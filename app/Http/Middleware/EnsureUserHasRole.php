@@ -15,7 +15,10 @@ class EnsureUserHasRole
     {
         $user = $request->user();
 
-        abort_unless($user && in_array($user->role, $roles, true), 403);
+        $userRole = strtolower($user?->role ?? '');
+        $allowedRoles = array_map('strtolower', $roles);
+
+        abort_unless($user && in_array($userRole, $allowedRoles, true), 403);
 
         return $next($request);
     }

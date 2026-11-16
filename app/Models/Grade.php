@@ -13,6 +13,7 @@ class Grade extends Model
     protected $fillable = [
         'student_id',
         'course_id',
+        'course_offering_id',
         'semester_id',
         'assignment_score',
         'quiz_score',
@@ -24,6 +25,11 @@ class Grade extends Model
         'grade_point',
         'status',
     ];
+
+    public function courseOffering(): BelongsTo
+    {
+        return $this->belongsTo(CourseOffering::class);
+    }
 
     protected function casts(): array
     {

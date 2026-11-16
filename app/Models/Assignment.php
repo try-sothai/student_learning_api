@@ -14,6 +14,7 @@ class Assignment extends Model
 
     protected $fillable = [
         'course_id',
+        'course_offering_id',
         'created_by',
         'teacher_id',
         'semester_id',
@@ -54,6 +55,11 @@ class Assignment extends Model
             $assignment->attempts()->delete();
             $assignment->questions()->delete();
         });
+    }
+
+    public function courseOffering(): BelongsTo
+    {
+        return $this->belongsTo(CourseOffering::class);
     }
 
     public function course(): BelongsTo

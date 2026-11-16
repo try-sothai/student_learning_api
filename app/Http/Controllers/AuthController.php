@@ -11,6 +11,8 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class AuthController extends Controller
@@ -40,7 +42,7 @@ class AuthController extends Controller
             'password' => 'required|string',
         ]);
 
-        $loginId = $request->login_id;
+        $loginId = trim($request->login_id);
 
         $user = null;
 
@@ -181,6 +183,18 @@ class AuthController extends Controller
         return redirect()->route('login');
     }
 
+    public function logoutApi(Request $request)
+    {
+        $user = $request->user();
+        if ($user && $user->currentAccessToken()) {
+            $user->currentAccessToken()->delete();
+        }
+
+        return response()->json([
+            'message' => 'Logged out successfully.',
+        ], 200);
+    }
+
     public function loginApi(Request $request)
     {
         $request->validate([
@@ -188,13 +202,26 @@ class AuthController extends Controller
             'password' => 'required|string',
         ]);
 
-        $user = $this->findUserByLoginId($request->login_id);
+        $loginId = trim($request->input('login_id'));
+        $throttleKey = Str::transliterate(Str::lower($loginId) . '|' . $request->ip());
+
+        if (RateLimiter::tooManyAttempts($throttleKey, 5)) {
+            $seconds = RateLimiter::availableIn($throttleKey);
+            return response()->json([
+                'message' => 'Too many login attempts. Please try again in ' . $seconds . ' seconds.',
+            ], 429);
+        }
+
+        $user = $this->findUserByLoginId($loginId);
 
         if (! $user || ! Hash::check($request->password, $user->password)) {
+            RateLimiter::hit($throttleKey, 300); // Lock for 5 minutes
             return response()->json([
                 'message' => 'Invalid credentials.',
             ], 401);
         }
+
+        RateLimiter::clear($throttleKey);
 
         $token = $user->createToken('api-token')->plainTextToken;
 
@@ -295,11 +322,21 @@ class AuthController extends Controller
     public function profile(Request $request)
     {
         $user = $request->user();
+        if ($user) {
+            if ($user->role === 'student') {
+                $user->load(['student.department', 'student.classRoom', 'student.program']);
+            } elseif ($user->role === 'teacher') {
+                $user->load(['teacher.department']);
+            } elseif ($user->role === 'admin') {
+                $user->load(['admin']);
+            }
+        }
 
         return response()->json([
             'message' => 'Profile retrieved successfully.',
             'user' => $user,
             'profile' => $this->getProfileData($user),
+            'data' => $user,
         ], 200);
     }
 
@@ -355,7 +392,7 @@ class AuthController extends Controller
         $rules = [
             'name' => 'required|string|max:255',
             'email' => [
-                'required',
+                'nullable',
                 'email',
                 'max:255',
                 Rule::unique('users', 'email')->ignore($user->id),
@@ -368,11 +405,14 @@ class AuthController extends Controller
         $rules['last_name'] = 'nullable|string|max:100';
         $rules['department'] = 'nullable|string|max:255';
         $rules['position'] = 'nullable|string|max:255';
+        $rules['phone'] = 'nullable|string|max:30';
 
         $validated = $request->validate($rules);
 
         $user->name = $validated['name'];
-        $user->email = $validated['email'];
+        if (array_key_exists('email', $validated) && $validated['email'] !== null) {
+            $user->email = $validated['email'];
+        }
 
         if ($request->hasFile('profile_picture')) {
             if ($user->profile_picture && Storage::disk('public')->exists($user->profile_picture)) {
@@ -427,6 +467,32 @@ class AuthController extends Controller
         ], 200);
     }
 
+    public function changePassword(Request $request)
+    {
+        $user = $request->user();
+
+        $validated = $request->validate([
+            'current_password' => 'required|string',
+            'password' => 'required|string|min:8|confirmed',
+        ]);
+
+        if (! Hash::check($validated['current_password'], $user->password)) {
+            return response()->json([
+                'message' => 'The current password provided is incorrect.',
+                'errors' => [
+                    'current_password' => ['The current password provided is incorrect.']
+                ]
+            ], 422);
+        }
+
+        $user->password = Hash::make($validated['password']);
+        $user->save();
+
+        return response()->json([
+            'message' => 'Password changed successfully.',
+        ], 200);
+    }
+
     protected function findUserByLoginId(string $loginId): ?User
     {
         $student = Student::where('student_code', $loginId)->with('user')->first();
@@ -453,11 +519,11 @@ class AuthController extends Controller
     protected function getRoleProfile(User $user)
     {
         if ($user->role === 'student') {
-            return $user->student;
+            return $user->student?->load(['department', 'classRoom', 'program']);
         }
 
         if ($user->role === 'teacher') {
-            return $user->teacher;
+            return $user->teacher?->load(['department']);
         }
 
         if ($user->role === 'admin') {

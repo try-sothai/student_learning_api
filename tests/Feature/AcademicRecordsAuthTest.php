@@ -47,6 +47,46 @@ class AcademicRecordsAuthTest extends TestCase
         $this->getJson('/api/performance-records')->assertStatus(401);
     }
 
+    public function test_student_with_profile_can_access_their_dashboard()
+    {
+        $this->setUpData();
+
+        $response = $this->actingAs($this->studentUser1)->getJson('/api/dashboard/student');
+
+        $response->assertOk()
+            ->assertJsonPath('message', 'Student dashboard retrieved successfully.')
+            ->assertJsonStructure([
+                'data' => [
+                    'student',
+                    'enrollments',
+                    'analytics',
+                    'predictions',
+                    'risk_assessment',
+                    'recommendations',
+                    'notifications',
+                    'recent_grades',
+                    'gpa',
+                    'gpa_record',
+                    'chart_data',
+                    'chart_labels',
+                    'prediction_chart_data',
+                    'prediction_chart_labels',
+                ],
+            ])
+            ->assertJsonPath('data.student.id', $this->student1->id);
+    }
+
+    public function test_user_without_student_profile_cannot_access_another_students_dashboard()
+    {
+        $this->setUpData();
+
+        $response = $this->actingAs($this->missingProfileUser)->getJson('/api/dashboard/student');
+
+        $response->assertNotFound()
+            ->assertJsonPath('message', 'Student profile not found.')
+            ->assertJsonMissingPath('data');
+    }
+
     public function test_student_can_only_access_their_own_grades()
     {
         $this->setUpData();

@@ -20,6 +20,10 @@ class Student extends Model
         'user_id',
         'student_id',
         'student_code',
+        'khmer_name',
+        'english_name',
+        'place_of_birth',
+        'program_id',
         'department_id',
         'class_id',
         'first_name',
@@ -29,6 +33,7 @@ class Student extends Model
         'nationality',
         'phone',
         'address',
+        'current_address',
         'major',
         'year_level',
         'advisor',
@@ -40,7 +45,7 @@ class Student extends Model
      * Keeps the pre-existing API response key `student_id`
      * while the database column is `student_code`.
      */
-    protected $appends = ['student_id'];
+    protected $appends = ['student_id', 'current_address'];
 
     protected static function booted(): void
     {
@@ -74,6 +79,14 @@ class Student extends Model
         return Attribute::get(fn () => $this->student_code);
     }
 
+    protected function currentAddress(): Attribute
+    {
+        return Attribute::make(
+            get: fn () => $this->attributes['address'] ?? null,
+            set: fn ($value) => ['address' => $value],
+        );
+    }
+
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
@@ -82,6 +95,21 @@ class Student extends Model
     public function department(): BelongsTo
     {
         return $this->belongsTo(Department::class);
+    }
+
+    public function program(): BelongsTo
+    {
+        return $this->belongsTo(Program::class);
+    }
+
+    public function familyInformation(): \Illuminate\Database\Eloquent\Relations\HasOne
+    {
+        return $this->hasOne(StudentFamilyInformation::class);
+    }
+
+    public function emergencyContacts(): HasMany
+    {
+        return $this->hasMany(StudentEmergencyContact::class);
     }
 
     public function classRoom(): BelongsTo
@@ -169,5 +197,10 @@ class Student extends Model
     public function reports(): HasMany
     {
         return $this->hasMany(Report::class);
+    }
+
+    public function notes(): HasMany
+    {
+        return $this->hasMany(StudentNote::class);
     }
 }

@@ -74,14 +74,29 @@ final class DemoRoster
     public static function courses(): array
     {
         return [
+            // Computer Science (6 courses)
             ['code' => 'CS101', 'name' => 'Programming Fundamentals', 'dept' => 'CS', 'teacher' => 'TCH001', 'credit' => 3, 'slot' => 0, 'description' => 'Introduction to programming logic, control flow and basic problem solving.'],
             ['code' => 'CS201', 'name' => 'Data Structures and Algorithms', 'dept' => 'CS', 'teacher' => 'TCH001', 'credit' => 4, 'slot' => 1, 'description' => 'Lists, stacks, queues, trees, graphs and algorithm analysis.'],
             ['code' => 'CS301', 'name' => 'Database Systems', 'dept' => 'CS', 'teacher' => 'TCH002', 'credit' => 3, 'slot' => 2, 'description' => 'Relational modelling, SQL, normalization and transactions.'],
             ['code' => 'CS302', 'name' => 'Software Engineering', 'dept' => 'CS', 'teacher' => 'TCH002', 'credit' => 3, 'slot' => 3, 'description' => 'Software lifecycle, agile practices, testing and version control.'],
+            ['code' => 'CS401', 'name' => 'Computer Networks', 'dept' => 'CS', 'teacher' => 'TCH001', 'credit' => 3, 'slot' => 4, 'description' => 'Network architecture, TCP/IP stack, socket programming and routing.'],
+            ['code' => 'CS402', 'name' => 'Operating Systems', 'dept' => 'CS', 'teacher' => 'TCH002', 'credit' => 3, 'slot' => 5, 'description' => 'Processes, threads, memory management, file systems and concurrency.'],
+
+            // Information Technology (6 courses)
             ['code' => 'IT101', 'name' => 'Networking Fundamentals', 'dept' => 'IT', 'teacher' => 'TCH003', 'credit' => 3, 'slot' => 0, 'description' => 'OSI model, IP addressing, routing and network services.'],
             ['code' => 'IT201', 'name' => 'Web Development', 'dept' => 'IT', 'teacher' => 'TCH003', 'credit' => 4, 'slot' => 1, 'description' => 'HTML, CSS, JavaScript and building REST-backed web applications.'],
             ['code' => 'IT301', 'name' => 'Information Security', 'dept' => 'IT', 'teacher' => 'TCH004', 'credit' => 3, 'slot' => 2, 'description' => 'Threats, cryptography, authentication and secure system design.'],
             ['code' => 'IT302', 'name' => 'Mobile Application Development', 'dept' => 'IT', 'teacher' => 'TCH004', 'credit' => 3, 'slot' => 3, 'description' => 'Building Android apps that consume REST APIs.'],
+            ['code' => 'IT401', 'name' => 'Cloud Computing', 'dept' => 'IT', 'teacher' => 'TCH003', 'credit' => 3, 'slot' => 4, 'description' => 'Virtualization, cloud architectures, microservices and containerization.'],
+            ['code' => 'IT402', 'name' => 'Artificial Intelligence', 'dept' => 'IT', 'teacher' => 'TCH004', 'credit' => 3, 'slot' => 5, 'description' => 'Machine learning, neural networks, computer vision and NLP fundamentals.'],
+
+            // Business Administration (6 courses)
+            ['code' => 'BA101', 'name' => 'Principles of Management', 'dept' => 'BA', 'teacher' => 'TCH001', 'credit' => 3, 'slot' => 0, 'description' => 'Core functions of management, organizational structure and leadership.'],
+            ['code' => 'BA102', 'name' => 'Financial Accounting', 'dept' => 'BA', 'teacher' => 'TCH002', 'credit' => 3, 'slot' => 1, 'description' => 'Financial reporting, double-entry bookkeeping and balance sheet analysis.'],
+            ['code' => 'BA201', 'name' => 'Marketing Strategy', 'dept' => 'BA', 'teacher' => 'TCH003', 'credit' => 3, 'slot' => 2, 'description' => 'Market research, consumer behavior, branding and digital campaigns.'],
+            ['code' => 'BA202', 'name' => 'Organizational Behavior', 'dept' => 'BA', 'teacher' => 'TCH004', 'credit' => 3, 'slot' => 3, 'description' => 'Individual and group dynamics, motivation, culture and conflict management.'],
+            ['code' => 'BA301', 'name' => 'Business Analytics', 'dept' => 'BA', 'teacher' => 'TCH002', 'credit' => 3, 'slot' => 4, 'description' => 'Data-driven decision making, quantitative methods and forecasting.'],
+            ['code' => 'BA302', 'name' => 'Entrepreneurship', 'dept' => 'BA', 'teacher' => 'TCH001', 'credit' => 3, 'slot' => 5, 'description' => 'Startup lifecycle, business model canvas, funding and venture scaling.'],
         ];
     }
 

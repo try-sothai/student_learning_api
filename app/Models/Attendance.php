@@ -15,6 +15,7 @@ class Attendance extends Model
 
     protected $fillable = [
         'course_id',
+        'course_offering_id',
         'teacher_id',
         'semester_id',
         'attendance_date',
@@ -26,6 +27,11 @@ class Attendance extends Model
         'student_id',
         'marked_by',
     ];
+
+    public function courseOffering(): BelongsTo
+    {
+        return $this->belongsTo(CourseOffering::class);
+    }
 
     protected function casts(): array
     {

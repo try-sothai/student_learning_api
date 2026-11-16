@@ -77,9 +77,38 @@ class Teacher extends Model
         return $this->belongsTo(Department::class);
     }
 
+    public function courseOfferings(): \Illuminate\Database\Eloquent\Relations\BelongsToMany
+    {
+        return $this->belongsToMany(CourseOffering::class, 'course_offering_teachers')
+            ->withPivot(['id', 'role', 'status', 'assigned_at', 'ended_at'])
+            ->withTimestamps();
+    }
+
+    public function activeCourseOfferings(): \Illuminate\Database\Eloquent\Relations\BelongsToMany
+    {
+        return $this->courseOfferings()->wherePivot('status', 'active');
+    }
+
+    public function courseOfferingTeachers(): HasMany
+    {
+        return $this->hasMany(CourseOfferingTeacher::class);
+    }
+
     public function courses(): HasMany
     {
         return $this->hasMany(Course::class);
+    }
+
+    public function classes(): \Illuminate\Database\Eloquent\Relations\BelongsToMany
+    {
+        return $this->belongsToMany(ClassRoom::class, 'class_teacher', 'teacher_id', 'class_id')
+            ->withPivot('course_id')
+            ->withTimestamps();
+    }
+
+    public function facultyReviews(): HasMany
+    {
+        return $this->hasMany(FacultyReview::class);
     }
 
     public function attendanceSessions(): HasMany

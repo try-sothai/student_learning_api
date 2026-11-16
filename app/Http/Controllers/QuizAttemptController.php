@@ -11,12 +11,15 @@ class QuizAttemptController extends Controller
     {
         $query = QuizAttempt::with(['quiz.course', 'student.user']);
 
-        if ($request->has('quiz_id')) {
-            $query->where('quiz_id', $request->quiz_id);
+        $apiUser = auth('sanctum')->user() ?? $request->user();
+        if ($apiUser && $apiUser->role === 'student' && $apiUser->student) {
+            $query->where('student_id', $apiUser->student->id);
+        } elseif ($request->has('student_id')) {
+            $query->where('student_id', $request->student_id);
         }
 
-        if ($request->has('student_id')) {
-            $query->where('student_id', $request->student_id);
+        if ($request->has('quiz_id')) {
+            $query->where('quiz_id', $request->quiz_id);
         }
 
         $attempts = $query->latest()->get();
@@ -29,6 +32,20 @@ class QuizAttemptController extends Controller
 
     public function store(Request $request)
     {
+        if (! $request->filled('student_id') && $request->user()?->student) {
+            $request->merge(['student_id' => $request->user()->student->id]);
+        } elseif ($request->filled('student_id')) {
+            $rawStudentId = $request->input('student_id');
+            if (! \App\Models\Student::where('id', $rawStudentId)->exists()) {
+                $resolved = \App\Models\Student::where('student_code', (string) $rawStudentId)
+                    ->orWhere('user_id', $rawStudentId)
+                    ->value('id') ?? $request->user()?->student?->id;
+                if ($resolved) {
+                    $request->merge(['student_id' => $resolved]);
+                }
+            }
+        }
+
         $validated = $request->validate([
             'quiz_id' => 'required|integer|exists:quizzes,id',
             'student_id' => 'required|integer|exists:students,id',
@@ -69,8 +86,42 @@ class QuizAttemptController extends Controller
             'submitted_at' => 'nullable|date',
         ]);
 
+        $computedScore = $quizAttempt->score;
+        if (array_key_exists('score', $validated) && $validated['score'] !== null) {
+            $computedScore = $validated['score'];
+        } else {
+            $quizAttempt->load(['answers.question', 'quiz.questions']);
+            if ($quizAttempt->answers->isNotEmpty()) {
+                $earnedMarks = 0.0;
+                foreach ($quizAttempt->answers as $ans) {
+                    if ($ans->question) {
+                        $isCorrect = strtoupper(trim((string) $ans->answer)) === strtoupper(trim((string) $ans->question->correct_answer));
+                        $marksObtained = $isCorrect ? (float) $ans->question->marks : 0.0;
+                        if ($ans->is_correct !== $isCorrect || (float) $ans->marks_obtained !== $marksObtained) {
+                            $ans->update([
+                                'is_correct' => $isCorrect,
+                                'marks_obtained' => $marksObtained,
+                            ]);
+                        }
+                        $earnedMarks += $marksObtained;
+                    } else {
+                        $earnedMarks += (float) $ans->marks_obtained;
+                    }
+                }
+                $totalQuestionMarks = (float) ($quizAttempt->quiz?->questions?->sum('marks') ?? 0);
+                $quizTotalScore = (float) ($quizAttempt->quiz?->total_score ?? 0);
+                if ($totalQuestionMarks > 0 && $quizTotalScore > 0 && abs($totalQuestionMarks - $quizTotalScore) > 0.01) {
+                    $computedScore = round(($earnedMarks / $totalQuestionMarks) * $quizTotalScore, 2);
+                } else {
+                    $computedScore = round($earnedMarks, 2);
+                }
+            } elseif (($validated['status'] ?? 'completed') === 'completed' && $computedScore === null) {
+                $computedScore = 0.0;
+            }
+        }
+
         $quizAttempt->update([
-            'score' => $validated['score'] ?? $quizAttempt->score,
+            'score' => $computedScore,
             'status' => $validated['status'] ?? 'completed',
             'submitted_at' => $validated['submitted_at'] ?? now(),
         ]);

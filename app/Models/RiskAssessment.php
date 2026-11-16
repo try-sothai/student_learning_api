@@ -13,6 +13,7 @@ class RiskAssessment extends Model
     protected $fillable = [
         'student_id',
         'course_id',
+        'course_offering_id',
         'semester_id',
         'risk_level',
         'risk_score',
@@ -20,6 +21,11 @@ class RiskAssessment extends Model
         'assessment_date',
         'status',
     ];
+
+    public function courseOffering(): BelongsTo
+    {
+        return $this->belongsTo(CourseOffering::class);
+    }
 
     protected function casts(): array
     {

@@ -198,5 +198,125 @@ class AuthApiTest extends TestCase
             'student_code' => 'STD500',
         ]);
     }
+
+    public function test_student_can_change_password_via_api(): void
+    {
+        $this->seed();
+
+        $login = $this->postJson('/api/login', [
+            'login_id' => 'STD001',
+            'password' => '12345678',
+        ]);
+
+        $token = $login->json('token');
+
+        $response = $this->withToken($token)->postJson('/api/change-password', [
+            'current_password' => '12345678',
+            'password' => 'newSecret123',
+            'password_confirmation' => 'newSecret123',
+        ]);
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('message', 'Password changed successfully.');
+
+        $loginNew = $this->postJson('/api/login', [
+            'login_id' => 'STD001',
+            'password' => 'newSecret123',
+        ]);
+
+        $loginNew->assertOk();
+    }
+
+    public function test_invalid_current_password_is_rejected(): void
+    {
+        $this->seed();
+
+        $login = $this->postJson('/api/login', [
+            'login_id' => 'STD001',
+            'password' => '12345678',
+        ]);
+
+        $token = $login->json('token');
+
+        $response = $this->withToken($token)->postJson('/api/change-password', [
+            'current_password' => 'wrongPassword',
+            'password' => 'newSecret123',
+            'password_confirmation' => 'newSecret123',
+        ]);
+
+        $response
+            ->assertStatus(422)
+            ->assertJsonPath('message', 'The current password provided is incorrect.');
+    }
+
+    public function test_unauthenticated_cannot_change_password(): void
+    {
+        $response = $this->postJson('/api/change-password', [
+            'current_password' => '12345678',
+            'password' => 'newSecret123',
+            'password_confirmation' => 'newSecret123',
+        ]);
+
+        $response->assertStatus(401);
+    }
+
+    public function test_password_confirmation_mismatch_is_rejected(): void
+    {
+        $this->seed();
+
+        $login = $this->postJson('/api/login', [
+            'login_id' => 'STD001',
+            'password' => '12345678',
+        ]);
+
+        $token = $login->json('token');
+
+        $response = $this->withToken($token)->postJson('/api/change-password', [
+            'current_password' => '12345678',
+            'password' => 'newSecret123',
+            'password_confirmation' => 'differentPassword',
+        ]);
+
+        $response->assertStatus(422);
+    }
+
+    public function test_old_password_fails_after_successful_change(): void
+    {
+        $this->seed();
+
+        $login = $this->postJson('/api/login', [
+            'login_id' => 'STD001',
+            'password' => '12345678',
+        ]);
+
+        $token = $login->json('token');
+
+        $this->withToken($token)->postJson('/api/change-password', [
+            'current_password' => '12345678',
+            'password' => 'brandNewPassword123',
+            'password_confirmation' => 'brandNewPassword123',
+        ])->assertOk();
+
+        // Old password must now fail
+        $loginOld = $this->postJson('/api/login', [
+            'login_id' => 'STD001',
+            'password' => '12345678',
+        ]);
+
+        $loginOld->assertStatus(401);
+    }
+
+    public function test_admin_user_gets_404_on_student_dashboard_endpoint(): void
+    {
+        $this->seed();
+
+        $adminUser = \App\Models\User::where('role', 'admin')->first();
+
+        $response = $this->actingAs($adminUser)->getJson('/api/dashboard/student');
+
+        $response->assertStatus(404)
+            ->assertJsonPath('message', 'Student profile not found.');
+    }
 }
 

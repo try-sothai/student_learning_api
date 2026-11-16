@@ -13,6 +13,7 @@ class DatabaseSeeder extends Seeder
     {
         $this->call([
             AcademicStructureSeeder::class,
+            ProgramSeeder::class,
             UserSeeder::class,
             CourseSeeder::class,
             LearningDataSeeder::class,

@@ -13,6 +13,7 @@ class CourseEnrollment extends Model
     protected $fillable = [
         'student_id',
         'course_id',
+        'course_offering_id',
         'semester_id',
         'enrollment_date',
         'status',
@@ -31,6 +32,11 @@ class CourseEnrollment extends Model
     public function student(): BelongsTo
     {
         return $this->belongsTo(Student::class);
+    }
+
+    public function courseOffering(): BelongsTo
+    {
+        return $this->belongsTo(CourseOffering::class);
     }
 
     public function course(): BelongsTo

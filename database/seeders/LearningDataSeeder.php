@@ -301,6 +301,22 @@ class LearningDataSeeder extends Seeder
                         'academic_standing' => 'good',
                     ]
                 );
+
+                // 10. Risk Assessment
+                RiskAssessment::updateOrCreate(
+                    [
+                        'student_id' => $student->id,
+                        'course_id' => $course->id,
+                        'semester_id' => $semester->id,
+                    ],
+                    [
+                        'risk_level' => ($student->id % 3 == 0) ? 'high' : (($student->id % 2 == 0) ? 'medium' : 'low'),
+                        'risk_score' => ($student->id % 3 == 0) ? 78.5 : (($student->id % 2 == 0) ? 42.0 : 12.5),
+                        'risk_factors' => ['Low Quiz Scores', 'Attendance Warning'],
+                        'assessment_date' => now(),
+                        'status' => 'active',
+                    ]
+                );
             }
 
             // 12. Notifications for Student

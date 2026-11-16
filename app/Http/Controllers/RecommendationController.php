@@ -11,12 +11,22 @@ class RecommendationController extends Controller
     {
         $query = Recommendation::with(['student.user', 'course', 'semester']);
 
-        if ($request->has('student_id')) {
+        $apiUser = auth('sanctum')->user() ?? $request->user();
+        if ($apiUser && $apiUser->role === 'student') {
+            if (! $apiUser->student) {
+                return response()->json(['message' => 'Student profile not found.'], 404);
+            }
+            $query->where('student_id', $apiUser->student->id);
+        } elseif ($request->has('student_id')) {
             $query->where('student_id', $request->student_id);
         }
 
         if ($request->has('course_id')) {
             $query->where('course_id', $request->course_id);
+        }
+
+        if ($request->has('semester_id')) {
+            $query->where('semester_id', $request->semester_id);
         }
 
         if ($request->has('status')) {
@@ -64,6 +74,13 @@ class RecommendationController extends Controller
 
     public function show(Recommendation $recommendation)
     {
+        $apiUser = auth('sanctum')->user() ?? request()->user();
+        if ($apiUser && $apiUser->role === 'student') {
+            if (! $apiUser->student || (int) $recommendation->student_id !== (int) $apiUser->student->id) {
+                return response()->json(['message' => 'Unauthorized access.'], 403);
+            }
+        }
+
         return response()->json([
             'message' => 'Recommendation retrieved successfully.',
             'data' => $recommendation->load(['student.user', 'course', 'semester']),
@@ -72,6 +89,13 @@ class RecommendationController extends Controller
 
     public function update(Request $request, Recommendation $recommendation)
     {
+        $apiUser = auth('sanctum')->user() ?? $request->user();
+        if ($apiUser && $apiUser->role === 'student') {
+            if (! $apiUser->student || (int) $recommendation->student_id !== (int) $apiUser->student->id) {
+                return response()->json(['message' => 'Unauthorized access.'], 403);
+            }
+        }
+
         $validated = $request->validate([
             'status' => 'required|string|in:pending,viewed,completed,dismissed',
         ]);

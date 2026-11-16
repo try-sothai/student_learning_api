@@ -29,6 +29,20 @@ class AssignmentSubmissionController extends Controller
 
     public function store(Request $request)
     {
+        if (! $request->filled('student_id') && $request->user()?->student) {
+            $request->merge(['student_id' => $request->user()->student->id]);
+        } elseif ($request->filled('student_id')) {
+            $rawStudentId = $request->input('student_id');
+            if (! \App\Models\Student::where('id', $rawStudentId)->exists()) {
+                $resolved = \App\Models\Student::where('student_code', (string) $rawStudentId)
+                    ->orWhere('user_id', $rawStudentId)
+                    ->value('id') ?? $request->user()?->student?->id;
+                if ($resolved) {
+                    $request->merge(['student_id' => $resolved]);
+                }
+            }
+        }
+
         $validated = $request->validate([
             'assignment_id' => 'required|integer|exists:assignments,id',
             'student_id' => 'required|integer|exists:students,id',

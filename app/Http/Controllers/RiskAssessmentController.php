@@ -11,7 +11,13 @@ class RiskAssessmentController extends Controller
     {
         $query = RiskAssessment::with(['student.user', 'course', 'semester']);
 
-        if ($request->has('student_id')) {
+        $apiUser = auth('sanctum')->user() ?? $request->user();
+        if ($apiUser && $apiUser->role === 'student') {
+            if (! $apiUser->student) {
+                return response()->json(['message' => 'Student profile not found.'], 404);
+            }
+            $query->where('student_id', $apiUser->student->id);
+        } elseif ($request->has('student_id')) {
             $query->where('student_id', $request->student_id);
         }
 
