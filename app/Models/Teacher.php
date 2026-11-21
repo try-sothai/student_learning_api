@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\PersonNameHelper;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -19,22 +20,28 @@ class Teacher extends Model
         'user_id',
         'teacher_id',
         'teacher_code',
+        'khmer_name',
+        'english_name',
         'department_id',
         'first_name',
         'last_name',
         'date_of_birth',
+        'hire_date',
         'gender',
         'phone',
+        'office_location_id',
         'position',
+        'work_type',
         'specialization',
+        'biography',
         'status',
     ];
 
     /**
-     * Keeps the pre-existing API response key `teacher_id` (the teacher code).
-     * The database column itself is `teacher_code`.
+     * Keeps the pre-existing API response key `teacher_id` (the teacher code)
+     * plus computed profile accessors (`office_location`, `specializations`, `bio`).
      */
-    protected $appends = ['teacher_id'];
+    protected $appends = ['teacher_id', 'office_location', 'specializations', 'bio'];
 
     protected static function booted(): void
     {
@@ -58,13 +65,76 @@ class Teacher extends Model
     protected function casts(): array
     {
         return [
-            'date_of_birth' => 'date',
+            'date_of_birth' => 'date:Y-m-d',
+            'hire_date' => 'date:Y-m-d',
         ];
+    }
+
+    public function resolveDisplayName(): string
+    {
+        return PersonNameHelper::displayName(
+            $this->english_name,
+            $this->khmer_name,
+            $this->first_name,
+            $this->last_name,
+            (string) ($this->teacher_code ?? '')
+        );
     }
 
     protected function teacherId(): Attribute
     {
         return Attribute::get(fn () => $this->teacher_code);
+    }
+
+    protected function officeLocation(): Attribute
+    {
+        return Attribute::get(function () {
+            if (! $this->office_location_id) {
+                return null;
+            }
+            if ($this->relationLoaded('office')) {
+                return $this->getRelation('office')?->display_name;
+            }
+
+            return $this->office()->value('display_name');
+        });
+    }
+
+    protected function bio(): Attribute
+    {
+        return Attribute::get(fn () => $this->biography);
+    }
+
+    protected function specializations(): Attribute
+    {
+        return Attribute::get(function () {
+            $names = $this->relationLoaded('specializationItems')
+                ? $this->specializationItems
+                    ->sortBy(fn ($item) => $item->pivot?->id ?? PHP_INT_MAX)
+                    ->pluck('name')
+                    ->values()
+                    ->all()
+                : $this->specializationItems()->pluck('name')->values()->all();
+
+            if ($names === [] && ! empty($this->specialization)) {
+                return array_values(array_filter(array_map('trim', explode(',', (string) $this->specialization))));
+            }
+
+            return $names;
+        });
+    }
+
+    public function office(): BelongsTo
+    {
+        return $this->belongsTo(OfficeLocation::class, 'office_location_id');
+    }
+
+    public function specializationItems(): \Illuminate\Database\Eloquent\Relations\BelongsToMany
+    {
+        return $this->belongsToMany(Specialization::class, 'teacher_specialization')
+            ->withPivot('id')
+            ->orderBy('teacher_specialization.id')
+            ->withTimestamps();
     }
 
     public function user(): BelongsTo

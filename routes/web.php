@@ -987,8 +987,8 @@ Route::prefix('admin')
         Route::put('/students/{student}', [\App\Http\Controllers\AdminPeopleController::class, 'updateStudent'])->name('admin.students.update');
         Route::delete('/students/{student}', [\App\Http\Controllers\AdminPeopleController::class, 'destroyStudent'])->name('admin.students.destroy');
 
-        Route::get('/teachers', function () {
-            $managementRows = Teacher::with('user', 'department')->latest()->paginate(10)
+        Route::get('/teachers', function (\App\Services\TeacherProfileService $profiles) {
+            $managementRows = Teacher::with('user', 'department', 'office', 'specializationItems')->latest()->paginate(10)
                 ->through(fn (Teacher $teacher) => [
                     $teacher->user?->name ?? trim($teacher->first_name . ' ' . $teacher->last_name),
                     $teacher->teacher_id,
@@ -1006,36 +1006,45 @@ Route::prefix('admin')
                 ],
                 'managementRows' => $managementRows,
                 'managementCount' => $teacherCount,
+                'officeGroups' => $profiles->groupedOfficeLocations(),
+                'specializationsCatalog' => \App\Models\Specialization::orderBy('name')->get(['id', 'name']),
             ]);
         })->name('admin.teachers');
 
-        Route::post('/teachers', function (Request $request) {
+        Route::post('/teachers', function (
+            Request $request,
+            \App\Services\TeacherAccountService $accounts
+        ) {
+            if ($request->exists('email') && trim((string) $request->input('email')) === '') {
+                $request->merge(['email' => null]);
+            }
+
             $validated = $request->validate([
-                'teacher_id' => 'required|string|max:50|unique:teachers,teacher_code',
-                'first_name' => 'required|string|max:100',
-                'last_name' => 'required|string|max:100',
-                'email' => 'required|email|max:255|unique:users,email',
-                'password' => 'required|string|min:8|confirmed',
+                'teacher_id' => 'required|string|max:50',
+                'khmer_name' => 'nullable|string|max:150',
+                'english_name' => 'nullable|string|max:150',
+                'first_name' => 'nullable|string|max:100',
+                'last_name' => 'nullable|string|max:100',
+                'email' => 'nullable|email|max:255',
+                'password' => 'nullable|string|max:100',
                 'date_of_birth' => 'nullable|date',
+                'hire_date' => 'nullable|date',
                 'gender' => 'nullable|in:Male,Female',
                 'department' => 'nullable|string|max:255',
                 'position' => 'nullable|string|max:255',
-                'specialization' => 'nullable|string|max:255',
+                'work_type' => 'nullable|string|max:50',
+                'office_location_id' => 'nullable|integer|exists:office_locations,id',
+                'office_location' => 'nullable|string|max:191',
+                'specialization' => 'nullable|string|max:1000',
+                'specializations' => 'nullable|array',
+                'specializations.*' => 'nullable|string|max:120',
+                'biography' => 'nullable|string|max:2000',
                 'status' => 'required|string|max:50',
             ]);
 
-            DB::transaction(function () use ($validated) {
-                $user = User::create([
-                    'name' => trim($validated['first_name'] . ' ' . $validated['last_name']),
-                    'email' => $validated['email'],
-                    'password' => Hash::make($validated['password']),
-                    'role' => 'teacher',
-                ]);
+            $provisioned = $accounts->createTeacherWithAccount($validated, $request->user()?->id);
 
-                Teacher::create($validated + ['user_id' => $user->id]);
-            });
-
-            return redirect()->route('admin.teachers')->with('status', 'Teacher and login account created successfully.');
+            return redirect()->route('admin.teachers')->with('status', "Teacher created successfully. Username: {$provisioned['login_id']} | Initial Password: {$provisioned['initial_password']}");
         })->name('admin.teachers.store');
 
         Route::get('/teachers/{teacher}', [\App\Http\Controllers\AdminPeopleController::class, 'showTeacher'])->name('admin.teachers.show');

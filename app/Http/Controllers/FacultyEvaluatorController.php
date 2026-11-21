@@ -7,6 +7,7 @@ use App\Models\Course;
 use App\Models\FacultyReview;
 use App\Models\Grade;
 use App\Models\Teacher;
+use App\Services\TeacherProfileService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -45,7 +46,7 @@ class FacultyEvaluatorController extends Controller
         $search = trim((string) $request->query('search', ''));
         $reviewStatus = strtolower((string) $request->query('review_status', ''));
 
-        $query = Teacher::with(['department', 'user:id,name,email'])
+        $query = Teacher::with(['department', 'office', 'specializationItems', 'user:id,name,email'])
             ->withCount(['courses', 'classes']);
 
         if ($request->filled('department_id')) {
@@ -87,7 +88,7 @@ class FacultyEvaluatorController extends Controller
 
     public function show(Teacher $teacher): JsonResponse
     {
-        $teacher->load(['department', 'user:id,name,email'])->loadCount(['courses', 'classes']);
+        $teacher->load(['department', 'office', 'specializationItems', 'user:id,name,email'])->loadCount(['courses', 'classes']);
         $metrics = $this->metricsFor([$teacher->id]);
 
         return response()->json([
@@ -96,19 +97,45 @@ class FacultyEvaluatorController extends Controller
         ]);
     }
 
-    public function update(Request $request, Teacher $teacher): JsonResponse
+    public function update(Request $request, Teacher $teacher, TeacherProfileService $profiles): JsonResponse
     {
         $validated = $request->validate([
             'first_name' => 'sometimes|string|max:100',
             'last_name' => 'sometimes|string|max:100',
             'position' => 'sometimes|nullable|string|max:100',
-            'specialization' => 'sometimes|nullable|string|max:150',
+            'work_type' => 'sometimes|nullable|string|max:50',
+            'specialization' => 'sometimes|nullable|string|max:1000',
+            'specializations' => 'sometimes|nullable|array',
+            'specializations.*' => 'nullable|string|max:120',
+            'office_location_id' => 'sometimes|nullable|integer|exists:office_locations,id',
+            'office_location' => 'sometimes|nullable|string|max:191',
+            'biography' => 'sometimes|nullable|string|max:2000',
+            'bio' => 'sometimes|nullable|string|max:2000',
             'phone' => 'sometimes|nullable|string|max:30',
             'department_id' => 'sometimes|nullable|integer|exists:departments,id',
         ]);
 
-        DB::transaction(function () use ($teacher, $validated) {
-            $teacher->update($validated);
+        DB::transaction(function () use ($request, $teacher, $validated, $profiles) {
+            $data = collect($validated)->only(['first_name', 'last_name', 'position', 'work_type', 'phone', 'department_id'])->all();
+            if (array_key_exists('office_location_id', $validated) || array_key_exists('office_location', $validated)) {
+                $data['office_location_id'] = $profiles->resolveOfficeLocationId(
+                    $validated['office_location_id'] ?? null,
+                    $validated['office_location'] ?? null,
+                    $request->user()?->id
+                );
+            }
+            if (array_key_exists('biography', $validated) || array_key_exists('bio', $validated)) {
+                $data['biography'] = $profiles->cleanBiography($validated['biography'] ?? $validated['bio'] ?? null);
+            }
+            $teacher->update($data);
+            if (array_key_exists('specializations', $validated) || array_key_exists('specialization', $validated)) {
+                $profiles->syncSpecializations(
+                    $teacher,
+                    $validated['specializations'] ?? null,
+                    $validated['specialization'] ?? null,
+                    $request->user()?->id
+                );
+            }
             if ($teacher->user && (isset($validated['first_name']) || isset($validated['last_name']))) {
                 $teacher->user->update(['name' => trim($teacher->first_name . ' ' . $teacher->last_name)]);
             }
@@ -119,7 +146,7 @@ class FacultyEvaluatorController extends Controller
 
     public function courses(Teacher $teacher): JsonResponse
     {
-        $courses = $teacher->courses()->get(['id', 'course_code', 'course_name', 'department_id', 'status']);
+        $courses = $teacher->courses()->get(['id', 'code', 'name', 'course_code', 'course_name', 'department_id', 'status']);
 
         return response()->json(['message' => 'Assigned courses retrieved successfully.', 'data' => $courses]);
     }
@@ -156,10 +183,16 @@ class FacultyEvaluatorController extends Controller
             'class_ids' => 'required|array|min:1',
             'class_ids.*' => 'integer|distinct|exists:classes,id',
             'course_id' => 'nullable|integer|exists:courses,id',
+            'semester_id' => 'nullable|integer|exists:semesters,id',
+            'academic_year_id' => 'nullable|integer|exists:academic_years,id',
         ]);
 
         DB::transaction(function () use ($teacher, $validated) {
             $courseId = $validated['course_id'] ?? null;
+            $semesterId = $validated['semester_id']
+                ?? \App\Models\Semester::where('status', 'active')->value('id')
+                ?? \App\Models\Semester::orderByDesc('id')->value('id');
+
             foreach ($validated['class_ids'] as $classId) {
                 $exists = DB::table('class_teacher')
                     ->where('class_id', $classId)->where('teacher_id', $teacher->id)
@@ -167,6 +200,43 @@ class FacultyEvaluatorController extends Controller
                     ->exists();
                 if (! $exists) {
                     $teacher->classes()->attach($classId, ['course_id' => $courseId]);
+                }
+
+                if ($courseId && $semesterId) {
+                    $classRoom = ClassRoom::find($classId);
+                    $offering = \App\Models\CourseOffering::firstOrCreate(
+                        [
+                            'course_id' => $courseId,
+                            'class_id' => $classId,
+                            'semester_id' => $semesterId,
+                        ],
+                        [
+                            'academic_year_id' => $validated['academic_year_id'] ?? $classRoom?->academic_year_id,
+                            'status' => 'active',
+                        ]
+                    );
+
+                    DB::table('course_offering_teachers')->updateOrInsert(
+                        ['course_offering_id' => $offering->id, 'teacher_id' => $teacher->id],
+                        ['role' => 'primary', 'status' => 'active', 'assigned_at' => now(), 'updated_at' => now(), 'created_at' => now()]
+                    );
+
+                    // Sync existing class students into the course offering enrollment
+                    $students = \App\Models\Student::where('class_id', $classId)->get(['id', 'enrollment_date', 'status']);
+                    foreach ($students as $stu) {
+                        if (in_array(strtolower((string) $stu->status), ['inactive', 'suspended', 'graduated', 'dropped'], true)) {
+                            continue;
+                        }
+                        \App\Models\CourseEnrollment::updateOrCreate(
+                            ['student_id' => $stu->id, 'course_offering_id' => $offering->id],
+                            [
+                                'course_id' => $courseId,
+                                'semester_id' => $semesterId,
+                                'enrollment_date' => $stu->enrollment_date?->toDateString() ?? now()->toDateString(),
+                                'status' => 'enrolled',
+                            ]
+                        );
+                    }
                 }
             }
         });
@@ -276,12 +346,18 @@ class FacultyEvaluatorController extends Controller
             'email' => $t->user?->email,
             'phone' => $t->phone,
             'position' => $t->position,
+            'work_type' => $t->work_type ?? 'Full-time',
+            'office_location_id' => $t->office_location_id,
+            'office_location' => $t->office?->display_name,
             'specialization' => $t->specialization,
+            'specializations' => $t->specializations,
+            'biography' => $t->biography,
             'department_id' => $t->department_id,
             'department' => $t->department?->name,
             'courses_count' => $t->courses_count ?? 0,
             'classes_count' => $t->classes_count ?? 0,
             'class_pass_rate' => $m['pass_rate'] ?? null,
+            'average_rating' => $m['rating'] ?? null,
             'student_rating' => $m['rating'] ?? null,
             'review_status' => $m['review_status'] ?? 'Pending Review',
         ];

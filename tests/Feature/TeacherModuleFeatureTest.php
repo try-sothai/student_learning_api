@@ -335,4 +335,128 @@ class TeacherModuleFeatureTest extends TestCase
             'student_id' => $this->student->id,
         ]);
     }
+
+    public function test_teacher_students_and_detail_enforce_scope(): void
+    {
+        $resA = $this->actingAs($this->teacherUserA)
+            ->getJson('/api/teacher/students')
+            ->assertStatus(200);
+        $this->assertCount(1, $resA->json('data.students'));
+
+        $this->actingAs($this->teacherUserA)
+            ->getJson('/api/teacher/students/' . $this->student->id)
+            ->assertStatus(200)
+            ->assertJsonPath('data.student.id', $this->student->id);
+
+        // Teacher B is not teaching this student -> 403
+        $this->actingAs($this->teacherUserB)
+            ->getJson('/api/teacher/students/' . $this->student->id)
+            ->assertStatus(403);
+    }
+
+    public function test_teacher_can_record_attendance_and_unauthorized_teacher_is_blocked(): void
+    {
+        $this->actingAs($this->teacherUserA)
+            ->postJson('/api/teacher/course-offerings/' . $this->offeringA->id . '/attendance', [
+                'attendance_date' => '2026-11-18',
+                'topic' => 'Week 5 Lecture',
+                'records' => [
+                    ['student_id' => $this->student->id, 'status' => 'present'],
+                ],
+            ])
+            ->assertStatus(201);
+
+        $this->actingAs($this->teacherUserB)
+            ->postJson('/api/teacher/course-offerings/' . $this->offeringA->id . '/attendance', [
+                'attendance_date' => '2026-11-18',
+                'records' => [
+                    ['student_id' => $this->student->id, 'status' => 'present'],
+                ],
+            ])
+            ->assertStatus(403);
+
+        $this->actingAs($this->teacherUserA)
+            ->getJson('/api/teacher/attendance-overview')
+            ->assertStatus(200)
+            ->assertJsonPath('data.summary.present', 1);
+    }
+
+    public function test_teacher_assignments_grading_quizzes_scores_and_risk_endpoints(): void
+    {
+        // Create assignment
+        $asnRes = $this->actingAs($this->teacherUserA)
+            ->postJson('/api/teacher/course-offerings/' . $this->offeringA->id . '/assignments', [
+                'title' => 'Lab 1',
+                'total_score' => 100,
+                'due_date' => now()->addDays(5)->toDateTimeString(),
+                'status' => 'published',
+            ])
+            ->assertStatus(201);
+        $asnId = $asnRes->json('data.id');
+
+        $sub = AssignmentSubmission::create([
+            'assignment_id' => $asnId,
+            'student_id' => $this->student->id,
+            'status' => 'submitted',
+            'submitted_at' => now(),
+        ]);
+
+        // Teacher B cannot grade Teacher A's submission
+        $this->actingAs($this->teacherUserB)
+            ->postJson("/api/teacher/submissions/{$sub->id}/grade", ['score' => 90])
+            ->assertStatus(403);
+
+        // Teacher A grades submission
+        $this->actingAs($this->teacherUserA)
+            ->postJson("/api/teacher/submissions/{$sub->id}/grade", [
+                'score' => 92,
+                'feedback' => 'Well done',
+            ])
+            ->assertStatus(200)
+            ->assertJsonPath('data.score', 92);
+
+        // Create quiz, add question, publish
+        $qzRes = $this->actingAs($this->teacherUserA)
+            ->postJson('/api/teacher/course-offerings/' . $this->offeringA->id . '/quizzes', [
+                'title' => 'Pop Quiz 1',
+                'total_score' => 50,
+                'status' => 'draft',
+            ])
+            ->assertStatus(201);
+        $qzId = $qzRes->json('data.id');
+
+        $this->actingAs($this->teacherUserA)
+            ->postJson("/api/teacher/quizzes/{$qzId}/questions", [
+                'question_text' => 'What is 2+2?',
+                'question_type' => 'short_answer',
+                'correct_answer' => '4',
+                'points' => 10,
+            ])
+            ->assertStatus(201);
+
+        $this->actingAs($this->teacherUserA)
+            ->patchJson("/api/teacher/quizzes/{$qzId}/publish")
+            ->assertStatus(200)
+            ->assertJsonPath('data.status', 'published');
+
+        // Enter score
+        $this->actingAs($this->teacherUserA)
+            ->postJson('/api/teacher/course-offerings/' . $this->offeringA->id . '/scores', [
+                'student_id' => $this->student->id,
+                'total_score' => 88,
+            ])
+            ->assertStatus(201)
+            ->assertJsonPath('data.letter_grade', 'A-');
+
+        // Assessments overview & risk predictions
+        $this->actingAs($this->teacherUserA)
+            ->getJson('/api/teacher/assessments-overview')
+            ->assertStatus(200)
+            ->assertJsonPath('data.summary.total_assignments', 1);
+
+        $this->actingAs($this->teacherUserA)
+            ->getJson('/api/teacher/risk-predictions')
+            ->assertStatus(200)
+            ->assertJsonPath('data.has_predictions', false);
+    }
 }

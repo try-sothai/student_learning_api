@@ -36,19 +36,11 @@ class AdminAnalyticsController extends Controller
                 $q->where('academic_year_id', $ay->id);
             })->whereIn('risk_level', ['high', 'medium'])->distinct('student_id')->count('student_id');
 
-            // Fallback for demo data when queries return exactly 14 uniformly
-            if ($totalStudents > 0) {
-                // Create realistic variance for chart plotting so lines don't stack perfectly
-                $ayId = $ay->id % 5;
-                $activeLearners = (int)($totalStudents * (0.75 + ($ayId * 0.05)));
-                $atRiskStudents = (int)($totalStudents * (0.10 + ($ayId * 0.02)));
-            }
-
             $series[] = [
                 'academic_year' => $ay->name,
                 'total_students' => $totalStudents,
-                'active_learners' => $activeLearners > $totalStudents ? $totalStudents : $activeLearners,
-                'at_risk_students' => $atRiskStudents > $totalStudents ? $totalStudents : $atRiskStudents
+                'active_learners' => min($activeLearners, $totalStudents),
+                'at_risk_students' => min($atRiskStudents, $totalStudents)
             ];
         }
 
@@ -70,17 +62,26 @@ class AdminAnalyticsController extends Controller
             // Map 0-4 GPA scale to 0-100% scale for charting visual compatibility
             $avgGpaMapped = $avgGpa > 0 ? ($avgGpa / 4.0) * 100 : 0;
 
-            $avgAssignment = AssignmentSubmission::whereHas('assignment.semester', function($q) use ($sem) {
-                $q->where('id', $sem->id);
-            })->avg('score') ?? 0;
+            $avgAssignment = AssignmentSubmission::join('assignments', 'assignment_submissions.assignment_id', '=', 'assignments.id')
+                ->where('assignments.semester_id', $sem->id)
+                ->whereNotNull('assignment_submissions.score')
+                ->where('assignments.total_score', '>', 0)
+                ->selectRaw('AVG((assignment_submissions.score / assignments.total_score) * 100) as avg_pct')
+                ->value('avg_pct') ?? 0;
 
-            $avgQuiz = QuizAttempt::whereHas('quiz.semester', function($q) use ($sem) {
-                $q->where('id', $sem->id);
-            })->avg('score') ?? 0;
+            $avgQuiz = QuizAttempt::join('quizzes', 'quiz_attempts.quiz_id', '=', 'quizzes.id')
+                ->where('quizzes.semester_id', $sem->id)
+                ->whereNotNull('quiz_attempts.score')
+                ->where('quizzes.total_score', '>', 0)
+                ->selectRaw('AVG((quiz_attempts.score / quizzes.total_score) * 100) as avg_pct')
+                ->value('avg_pct') ?? 0;
 
-            $avgExam = ExamResult::whereHas('exam.semester', function($q) use ($sem) {
-                $q->where('id', $sem->id);
-            })->avg('score') ?? 0;
+            $avgExam = ExamResult::join('exams', 'exam_results.exam_id', '=', 'exams.id')
+                ->where('exams.semester_id', $sem->id)
+                ->whereNotNull('exam_results.score')
+                ->where('exams.total_score', '>', 0)
+                ->selectRaw('AVG((exam_results.score / exams.total_score) * 100) as avg_pct')
+                ->value('avg_pct') ?? 0;
 
             $series[] = [
                 'semester' => $sem->name,
@@ -106,16 +107,22 @@ class AdminAnalyticsController extends Controller
         $series = [];
 
         foreach ($semesters as $sem) {
-            $attendanceDetails = AttendanceDetail::whereHas('attendance.semester', function($q) use ($sem) {
-                $q->where('id', $sem->id);
-            })->get();
+            $agg = AttendanceDetail::join('attendance', 'attendance_details.attendance_id', '=', 'attendance.id')
+                ->where('attendance.semester_id', $sem->id)
+                ->selectRaw("
+                    COUNT(*) as total,
+                    SUM(CASE WHEN attendance_details.status = 'present' THEN 1 ELSE 0 END) as present_count,
+                    SUM(CASE WHEN attendance_details.status = 'absent' THEN 1 ELSE 0 END) as absent_count,
+                    SUM(CASE WHEN attendance_details.status = 'late' THEN 1 ELSE 0 END) as late_count
+                ")
+                ->first();
 
-            $total = $attendanceDetails->count();
-            $present = $attendanceDetails->where('status', 'present')->count();
-            $absent = $attendanceDetails->where('status', 'absent')->count();
-            $late = $attendanceDetails->where('status', 'late')->count();
+            $total = (int) ($agg->total ?? 0);
+            $present = (int) ($agg->present_count ?? 0);
+            $absent = (int) ($agg->absent_count ?? 0);
+            $late = (int) ($agg->late_count ?? 0);
 
-            $rate = $total > 0 ? round(($present / $total) * 100, 2) : 0;
+            $rate = $total > 0 ? round((($present + $late) / $total) * 100, 2) : 0;
 
             $series[] = [
                 'semester' => $sem->name,
@@ -155,6 +162,141 @@ class AdminAnalyticsController extends Controller
                     'high_percentage' => $total > 0 ? round(($high / $total) * 100, 2) : 0
                 ]
             ]
+        ]);
+    }
+
+    public function modelEvaluation(Request $request)
+    {
+        $semesterId = $request->query('semester_id');
+
+        $predictions = \App\Models\Prediction::with(['student.user', 'course', 'semester'])
+            ->when($semesterId, fn ($q) => $q->where('semester_id', $semesterId))
+            ->orderByDesc('prediction_date')
+            ->get();
+
+        if ($predictions->isEmpty()) {
+            return response()->json([
+                'success' => true,
+                'message' => 'No prediction records available for model evaluation.',
+                'data' => [
+                    'has_data' => false,
+                    'total_predictions' => 0,
+                    'evaluated_count' => 0,
+                    'mae' => null,
+                    'rmse' => null,
+                    'r2' => null,
+                    'actual_scores' => [],
+                    'predicted_scores' => [],
+                    'evaluation_labels' => [],
+                    'recent_evaluations' => [],
+                ],
+            ]);
+        }
+
+        // Match predictions against actual grades for the same student + semester (+ course if specified)
+        $grades = \App\Models\Grade::query()
+            ->whereIn('student_id', $predictions->pluck('student_id')->unique())
+            ->get()
+            ->groupBy(fn ($g) => $g->student_id . ':' . $g->semester_id . ':' . ($g->course_id ?? ''));
+
+        $pairs = [];
+        $actualScores = [];
+        $predictedScores = [];
+        $labels = [];
+
+        foreach ($predictions as $p) {
+            $key = $p->student_id . ':' . $p->semester_id . ':' . ($p->course_id ?? '');
+            $matched = $grades->get($key)?->first();
+            if (! $matched || $matched->total_score === null) {
+                continue;
+            }
+            $actual = (float) $matched->total_score;
+            $pred = (float) $p->predicted_score;
+            $pairs[] = [
+                'actual' => $actual,
+                'predicted' => $pred,
+                'date' => (string) $p->prediction_date,
+                'model_version' => $p->model_version ?? 'v1.0.0',
+            ];
+            if (count($actualScores) < 12) {
+                $actualScores[] = round($actual, 2);
+                $predictedScores[] = round($pred, 2);
+                $labels[] = $p->student?->student_code ?? ('Stu ' . $p->student_id);
+            }
+        }
+
+        $n = count($pairs);
+        if ($n === 0) {
+            return response()->json([
+                'success' => true,
+                'message' => 'Predictions exist, but no matching actual grades were found for evaluation.',
+                'data' => [
+                    'has_data' => false,
+                    'total_predictions' => $predictions->count(),
+                    'evaluated_count' => 0,
+                    'mae' => null,
+                    'rmse' => null,
+                    'r2' => null,
+                    'actual_scores' => [],
+                    'predicted_scores' => [],
+                    'evaluation_labels' => [],
+                    'recent_evaluations' => [],
+                ],
+            ]);
+        }
+
+        $sumAbs = 0.0;
+        $sumSq = 0.0;
+        $sumActual = 0.0;
+        foreach ($pairs as $pair) {
+            $err = $pair['actual'] - $pair['predicted'];
+            $sumAbs += abs($err);
+            $sumSq += $err * $err;
+            $sumActual += $pair['actual'];
+        }
+        $mae = round($sumAbs / $n, 2);
+        $rmse = round(sqrt($sumSq / $n), 2);
+        $meanActual = $sumActual / $n;
+        $ssTot = 0.0;
+        foreach ($pairs as $pair) {
+            $diff = $pair['actual'] - $meanActual;
+            $ssTot += $diff * $diff;
+        }
+        $r2 = $ssTot > 0 ? round(1.0 - ($sumSq / $ssTot), 2) : null;
+
+        $recentEvaluations = collect($pairs)
+            ->groupBy(fn ($item) => $item['date'] . '|' . $item['model_version'])
+            ->map(function ($group, $groupKey) {
+                [$date, $version] = explode('|', $groupKey, 2);
+                $cnt = $group->count();
+                $gAbs = $group->sum(fn ($i) => abs($i['actual'] - $i['predicted']));
+                $gSq = $group->sum(fn ($i) => pow($i['actual'] - $i['predicted'], 2));
+                return [
+                    'date' => $date,
+                    'title' => 'Model ' . $version . ' (' . $cnt . ' samples)',
+                    'mae' => round($gAbs / $cnt, 2),
+                    'rmse' => round(sqrt($gSq / $cnt), 2),
+                ];
+            })
+            ->values()
+            ->take(5)
+            ->all();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Model evaluation metrics calculated from verified predictions and grades.',
+            'data' => [
+                'has_data' => true,
+                'total_predictions' => $predictions->count(),
+                'evaluated_count' => $n,
+                'mae' => $mae,
+                'rmse' => $rmse,
+                'r2' => $r2,
+                'actual_scores' => $actualScores,
+                'predicted_scores' => $predictedScores,
+                'evaluation_labels' => $labels,
+                'recent_evaluations' => $recentEvaluations,
+            ],
         ]);
     }
 }

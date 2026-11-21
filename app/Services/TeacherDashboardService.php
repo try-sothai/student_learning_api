@@ -55,8 +55,9 @@ class TeacherDashboardService
         }
 
         // 2. My Courses: distinct courses currently assigned to the teacher in scope
+        $hasActiveFilter = ! empty(array_filter($filters, fn ($v) => $v !== null && $v !== ''));
         $myCoursesCount = count($courseIds);
-        if ($myCoursesCount === 0) {
+        if ($myCoursesCount === 0 && ! $hasActiveFilter) {
             $myCoursesCount = Course::where('teacher_id', $teacher->id)
                 ->whereNull('deleted_at')
                 ->count();
@@ -102,14 +103,24 @@ class TeacherDashboardService
                 ->count();
         }
 
-        $pendingAttendance = Attendance::query()
-            ->where(function (Builder $q) use ($offeringIds, $courseIds, $teacher) {
-                $q->whereIn('course_offering_id', $offeringIds)
-                  ->orWhereIn('course_id', $courseIds)
-                  ->orWhere('teacher_id', $teacher->id);
-            })
-            ->where('status', 'scheduled')
-            ->count();
+        $pendingAttendance = 0;
+        if (! empty($offeringIds) || ! empty($courseIds)) {
+            $pendingAttendance = Attendance::query()
+                ->where(function (Builder $q) use ($offeringIds, $courseIds) {
+                    if (! empty($offeringIds)) {
+                        $q->whereIn('course_offering_id', $offeringIds);
+                    }
+                    if (! empty($courseIds)) {
+                        $q->orWhereIn('course_id', $courseIds);
+                    }
+                })
+                ->where('status', 'scheduled')
+                ->count();
+        } elseif (! $hasActiveFilter) {
+            $pendingAttendance = Attendance::where('teacher_id', $teacher->id)
+                ->where('status', 'scheduled')
+                ->count();
+        }
 
         $pendingScores = $pendingAssignments + $pendingAttendance;
 

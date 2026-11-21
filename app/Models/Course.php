@@ -101,12 +101,27 @@ class Course extends Model
 
     public function department(): BelongsTo
     {
-        return $this->belongsTo(Department::class);
+        return $this->belongsTo(Department::class, 'department_id');
+    }
+
+    public function departmentRelation(): BelongsTo
+    {
+        return $this->belongsTo(Department::class, 'department_id');
     }
 
     public function teacher(): BelongsTo
     {
         return $this->belongsTo(Teacher::class);
+    }
+
+    public function offerings(): HasMany
+    {
+        return $this->hasMany(CourseOffering::class, 'course_id');
+    }
+
+    public function classes(): HasMany
+    {
+        return $this->hasMany(ClassRoom::class, 'course_id');
     }
 
     public function students(): BelongsToMany

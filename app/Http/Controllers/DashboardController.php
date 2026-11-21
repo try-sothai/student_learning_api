@@ -36,7 +36,14 @@ class DashboardController extends Controller
         $courseId = $request->query('course_id');
 
         $enrollmentsQuery = CourseEnrollment::where('student_id', $student->id)
-            ->with(['course.teacher.user', 'semester']);
+            ->with([
+                'course.teacher.user',
+                'course.departmentRelation',
+                'semester',
+                'courseOffering.classRoom.building',
+                'courseOffering.classRoom.floor',
+                'courseOffering.activeTeachers.user',
+            ]);
 
         if ($semesterId) {
             $enrollmentsQuery->where('semester_id', $semesterId);
@@ -45,6 +52,41 @@ class DashboardController extends Controller
             $enrollmentsQuery->where('course_id', $courseId);
         }
         $enrollments = $enrollmentsQuery->get();
+
+        // Enrich each enrolled course with its real ClassSchedule & Offering Teacher
+        foreach ($enrollments as $enr) {
+            if (! $enr->course) {
+                continue;
+            }
+            $sched = \App\Models\ClassSchedule::with(['classRoom', 'building', 'floor', 'teacher.user'])
+                ->where('course_id', $enr->course_id)
+                ->where('status', 'active')
+                ->when($enr->course_offering_id, fn ($q) => $q->where('course_offering_id', $enr->course_offering_id))
+                ->when(! $enr->course_offering_id && $student->class_id, fn ($q) => $q->where('class_id', $student->class_id))
+                ->orderBy('id')
+                ->first();
+
+            $classRoom = $sched?->classRoom ?? $enr->courseOffering?->classRoom;
+            $locParts = array_filter([
+                $sched?->building?->name ?? $classRoom?->building?->name,
+                $sched?->floor?->name ?? $classRoom?->floor?->name,
+                $classRoom?->name,
+            ]);
+            if (! empty($locParts)) {
+                $enr->course->setAttribute('room', implode(' • ', $locParts));
+            }
+            if ($sched) {
+                $enr->course->setAttribute('day_of_week', $sched->day_of_week);
+                $enr->course->setAttribute('start_time', substr((string) $sched->start_time, 0, 5));
+                $enr->course->setAttribute('end_time', substr((string) $sched->end_time, 0, 5));
+            }
+            $offeringTeacher = $sched?->teacher ?? $enr->courseOffering?->activeTeachers?->first();
+            if ($offeringTeacher && ! $enr->course->relationLoaded('teacher')) {
+                $enr->course->setRelation('teacher', $offeringTeacher);
+            } elseif ($offeringTeacher && ! $enr->course->teacher) {
+                $enr->course->setRelation('teacher', $offeringTeacher);
+            }
+        }
 
         $allSemesters = \App\Models\Semester::whereHas('courseEnrollments', function ($q) use ($student) {
             $q->where('student_id', $student->id);
@@ -522,6 +564,24 @@ class DashboardController extends Controller
         ], 200);
     }
 
+    /**
+     * Adds a flat, readable academic_context (class / semester / academic year) to each
+     * assessment so clients never have to show raw ids.
+     */
+    private function attachAcademicContext($items)
+    {
+        return $items->each(function ($item) {
+            $o = $item->courseOffering;
+            $item->setAttribute('academic_context', [
+                'course_offering_id' => $item->course_offering_id,
+                'class_name' => $o?->classRoom?->name ?? $o?->section_name,
+                'semester_name' => $o?->semester?->name ?? $item->semester?->name,
+                'academic_year_name' => $o?->semester?->academicYear?->name,
+            ]);
+            $item->unsetRelation('courseOffering');
+        });
+    }
+
     public function studentAssignments(Request $request)
     {
         $user = $request->user();
@@ -544,11 +604,8 @@ class DashboardController extends Controller
                 $query->where('student_id', $student->id)->orderByDesc('attempt_number');
             }
         ])
-            ->where('status', 'published')
-            ->whereHas('course.students', function ($query) use ($student) {
-                $query->where('students.id', $student->id)
-                      ->where('course_enrollments.status', 'enrolled');
-            });
+            ->whereIn('status', ['published', 'closed']);
+        app(\App\Services\AssessmentAccessService::class)->scopeForStudent($query, $student);
 
         if ($semesterId) {
             $query->where('semester_id', $semesterId);
@@ -558,7 +615,13 @@ class DashboardController extends Controller
             $query->where('course_id', $courseId);
         }
 
-        $assignments = $query->orderBy('due_date')->get();
+        $assignments = $this->attachAcademicContext($query->with('courseOffering.classRoom', 'courseOffering.semester.academicYear')->orderBy('due_date')->get());
+        $fileService = app(\App\Services\SubmissionFileService::class);
+        $assignments->each(function ($asn) use ($fileService) {
+            if ($asn->relationLoaded('submissions')) {
+                $asn->submissions->each(fn ($sub) => $fileService->decorateStudentSubmissionModel($sub));
+            }
+        });
 
         return response()->json([
             'message' => 'Student assignments retrieved successfully.',
@@ -586,11 +649,8 @@ class DashboardController extends Controller
             },
         ])
             ->withCount('questions')
-            ->whereIn('status', ['published', 'open', 'closed'])
-            ->whereHas('course.students', function ($query) use ($student) {
-                $query->where('students.id', $student->id)
-                      ->where('course_enrollments.status', 'enrolled');
-            });
+            ->whereIn('status', ['published', 'open', 'closed']);
+        app(\App\Services\AssessmentAccessService::class)->scopeForStudent($query, $student);
 
         if ($semesterId) {
             $query->where('semester_id', $semesterId);
@@ -600,7 +660,7 @@ class DashboardController extends Controller
             $query->where('course_id', $courseId);
         }
 
-        $quizzes = $query->orderBy('start_at')->get();
+        $quizzes = $this->attachAcademicContext($query->with('courseOffering.classRoom', 'courseOffering.semester.academicYear')->orderBy('start_at')->get());
 
         return response()->json([
             'message' => 'Student quizzes retrieved successfully.',
@@ -627,11 +687,8 @@ class DashboardController extends Controller
                 $query->where('student_id', $student->id);
             },
         ])
-            ->where('status', '!=', 'cancelled')
-            ->whereHas('course.students', function ($query) use ($student) {
-                $query->where('students.id', $student->id)
-                      ->where('course_enrollments.status', 'enrolled');
-            });
+            ->whereNotIn('status', ['cancelled', 'draft']);
+        app(\App\Services\AssessmentAccessService::class)->scopeForStudent($query, $student);
 
         if ($semesterId) {
             $query->where('semester_id', $semesterId);
@@ -641,7 +698,7 @@ class DashboardController extends Controller
             $query->where('course_id', $courseId);
         }
 
-        $exams = $query->orderBy('exam_date')->get();
+        $exams = $this->attachAcademicContext($query->with('courseOffering.classRoom', 'courseOffering.semester.academicYear')->orderBy('exam_date')->get());
 
         return response()->json([
             'message' => 'Student exams retrieved successfully.',
@@ -652,19 +709,43 @@ class DashboardController extends Controller
     public function teacher(Request $request)
     {
         $user = $request->user();
-        $teacher = $user?->teacher ?? Teacher::first();
+        $teacher = $user?->teacher ?? ($user?->role === 'admin' ? Teacher::first() : null);
 
         if (! $teacher) {
             return response()->json(['message' => 'Teacher profile not found.'], 404);
         }
 
-        $courses = Course::where('teacher_id', $teacher->id)->withCount('enrollments')->get();
-        $courseIds = $courses->pluck('id');
+        $authService = app(\App\Services\TeacherAuthorizationService::class);
+        $offeringsQuery = $authService->getAuthorizedOfferingsQuery($teacher);
+        if ($request->filled('semester_id')) {
+            $offeringsQuery->where('semester_id', (int) $request->query('semester_id'));
+        }
+        if ($request->filled('course_id')) {
+            $reqCourseId = (int) $request->query('course_id');
+            if ($user?->role !== 'admin' && ! $authService->isCourseAuthorized($teacher, $reqCourseId)) {
+                return response()->json(['message' => 'Unauthorized access to requested course.'], 403);
+            }
+            $offeringsQuery->where('course_id', $reqCourseId);
+        }
 
-        $activeAssignments = Assignment::whereIn('course_id', $courseIds)->latest()->take(5)->get();
-        $activeQuizzes = Quiz::whereIn('course_id', $courseIds)->latest()->take(5)->get();
+        $offeringCourseIds = (clone $offeringsQuery)->pluck('course_id')->filter()->unique();
+        $directCourseIds = Course::where('teacher_id', $teacher->id)
+            ->when($request->filled('course_id'), fn ($q) => $q->where('id', (int) $request->query('course_id')))
+            ->pluck('id');
+        $courseIds = $offeringCourseIds->merge($directCourseIds)->unique()->values();
+
+        $courses = Course::whereIn('id', $courseIds)->withCount('enrollments')->get();
+        $semesterFilter = $request->filled('semester_id') ? (int) $request->query('semester_id') : null;
+
+        $activeAssignments = Assignment::whereIn('course_id', $courseIds)
+            ->when($semesterFilter, fn ($q) => $q->where('semester_id', $semesterFilter))
+            ->latest()->take(5)->get();
+        $activeQuizzes = Quiz::whereIn('course_id', $courseIds)
+            ->when($semesterFilter, fn ($q) => $q->where('semester_id', $semesterFilter))
+            ->latest()->take(5)->get();
 
         $highRiskStudents = RiskAssessment::whereIn('course_id', $courseIds)
+            ->when($semesterFilter, fn ($q) => $q->where('semester_id', $semesterFilter))
             ->whereIn('risk_level', ['medium', 'high'])
             ->with(['student.user', 'course'])
             ->latest()
@@ -672,23 +753,67 @@ class DashboardController extends Controller
             ->get();
 
         // Calculate actual grade distribution across assigned courses
-        $grades = Grade::whereIn('course_id', $courseIds)->pluck('total_score');
+        $grades = Grade::whereIn('course_id', $courseIds)
+            ->when($semesterFilter, fn ($q) => $q->where('semester_id', $semesterFilter))
+            ->pluck('total_score')
+            ->filter(fn ($s) => $s !== null);
         $totalGrades = $grades->count();
         $gradeDist = [
-            'A' => $totalGrades > 0 ? round(($grades->filter(fn($s) => $s >= 85)->count() / $totalGrades) * 100, 1) : 28.0,
-            'B' => $totalGrades > 0 ? round(($grades->filter(fn($s) => $s >= 75 && $s < 85)->count() / $totalGrades) * 100, 1) : 32.0,
-            'C' => $totalGrades > 0 ? round(($grades->filter(fn($s) => $s >= 65 && $s < 75)->count() / $totalGrades) * 100, 1) : 22.0,
-            'D' => $totalGrades > 0 ? round(($grades->filter(fn($s) => $s >= 50 && $s < 65)->count() / $totalGrades) * 100, 1) : 12.0,
-            'F' => $totalGrades > 0 ? round(($grades->filter(fn($s) => $s < 50)->count() / $totalGrades) * 100, 1) : 6.0,
+            'A' => $totalGrades > 0 ? round(($grades->filter(fn ($s) => $s >= 85)->count() / $totalGrades) * 100, 1) : 0.0,
+            'B' => $totalGrades > 0 ? round(($grades->filter(fn ($s) => $s >= 75 && $s < 85)->count() / $totalGrades) * 100, 1) : 0.0,
+            'C' => $totalGrades > 0 ? round(($grades->filter(fn ($s) => $s >= 65 && $s < 75)->count() / $totalGrades) * 100, 1) : 0.0,
+            'D' => $totalGrades > 0 ? round(($grades->filter(fn ($s) => $s >= 50 && $s < 65)->count() / $totalGrades) * 100, 1) : 0.0,
+            'F' => $totalGrades > 0 ? round(($grades->filter(fn ($s) => $s < 50)->count() / $totalGrades) * 100, 1) : 0.0,
         ];
 
-        $pendingScores = AssignmentSubmission::whereHas('assignment', fn ($q) => $q->whereIn('course_id', $courseIds))
+        $avgScore = $totalGrades > 0 ? round((float) $grades->avg(), 1) : 0.0;
+        $passRate = $totalGrades > 0 ? round(($grades->filter(fn ($s) => $s >= 50)->count() / $totalGrades) * 100, 1) : 0.0;
+        $topPerformersCount = $grades->filter(fn ($s) => $s >= 85)->count();
+
+        $pendingScores = AssignmentSubmission::whereHas('assignment', fn ($q) => $q->whereIn('course_id', $courseIds)
+                ->when($semesterFilter, fn ($sq) => $sq->where('semester_id', $semesterFilter)))
             ->whereIn('status', ['submitted', 'pending'])
             ->whereNull('score')
-            ->count() + Attendance::whereIn('course_id', $courseIds)->where('status', 'scheduled')->count();
+            ->count() + Attendance::whereIn('course_id', $courseIds)
+                ->when($semesterFilter, fn ($sq) => $sq->where('semester_id', $semesterFilter))
+                ->where('status', 'scheduled')->count();
 
-        $totalEnrolled = CourseEnrollment::whereIn('course_id', $courseIds)->distinct('student_id')->count('student_id');
-        $atRiskCount = RiskAssessment::whereIn('course_id', $courseIds)->whereIn('risk_level', ['medium', 'high'])->distinct('student_id')->count('student_id');
+        $totalEnrolled = CourseEnrollment::whereIn('course_id', $courseIds)
+            ->when($semesterFilter, fn ($q) => $q->where('semester_id', $semesterFilter))
+            ->distinct('student_id')->count('student_id');
+        $atRiskCount = RiskAssessment::whereIn('course_id', $courseIds)
+            ->when($semesterFilter, fn ($q) => $q->where('semester_id', $semesterFilter))
+            ->whereIn('risk_level', ['medium', 'high'])
+            ->distinct('student_id')->count('student_id');
+
+        // Real monthly performance trend from assignment submissions / exam results
+        $monthlyRows = AssignmentSubmission::join('assignments', 'assignment_submissions.assignment_id', '=', 'assignments.id')
+            ->whereIn('assignments.course_id', $courseIds)
+            ->when($semesterFilter, fn ($q) => $q->where('assignments.semester_id', $semesterFilter))
+            ->whereNotNull('assignment_submissions.score')
+            ->where('assignments.total_score', '>', 0)
+            ->select(
+                'assignment_submissions.submitted_at',
+                'assignments.due_date',
+                'assignment_submissions.score',
+                'assignments.total_score'
+            )
+            ->get();
+
+        $groupedMonths = $monthlyRows->groupBy(function ($r) {
+            $dt = $r->submitted_at ?? $r->due_date;
+            return $dt ? \Carbon\Carbon::parse($dt)->format('Y-m') : 'Unknown';
+        })->forget('Unknown')->sortKeys()->take(-6);
+
+        $trendLabels = [];
+        $trendData = [];
+        $targetTrendData = [];
+        foreach ($groupedMonths as $ym => $rows) {
+            $trendLabels[] = \Carbon\Carbon::createFromFormat('Y-m', $ym)->format('M');
+            $pct = $rows->avg(fn ($r) => ((float) $r->score / (float) $r->total_score) * 100.0);
+            $trendData[] = round((float) $pct, 1);
+            $targetTrendData[] = 75.0;
+        }
 
         return response()->json([
             'message' => 'Teacher dashboard retrieved successfully.',
@@ -699,19 +824,26 @@ class DashboardController extends Controller
                 'my_courses' => $courses->count(),
                 'at_risk_students' => $highRiskStudents,
                 'at_risk_students_count' => $atRiskCount,
+                'top_performers_count' => $topPerformersCount,
+                'average_score' => $avgScore,
+                'pass_rate' => $passRate,
                 'pending_scores' => $pendingScores,
                 'summary' => [
                     'total_students' => $totalEnrolled,
                     'my_courses' => $courses->count(),
                     'at_risk_students' => $atRiskCount,
                     'pending_scores' => $pendingScores,
+                    'average_score' => $avgScore,
+                    'pass_rate' => $passRate,
+                    'top_performers_count' => $topPerformersCount,
                 ],
                 'active_assignments' => $activeAssignments,
                 'active_quizzes' => $activeQuizzes,
                 'grade_distribution' => $gradeDist,
-                'class_trend_labels' => ['Sep', 'Oct', 'Nov', 'Dec'],
-                'class_trend_data' => [63.0, 70.0, 81.0, 87.0],
-                'target_trend_data' => [54.0, 60.0, 68.0, 77.0],
+                'total_graded_records' => $totalGrades,
+                'class_trend_labels' => $trendLabels,
+                'class_trend_data' => $trendData,
+                'target_trend_data' => $targetTrendData,
             ],
         ], 200);
     }
@@ -906,17 +1038,76 @@ class DashboardController extends Controller
 
     public function adminStatistics(Request $request)
     {
+        $semesterId = $request->query('semester_id');
+        $academicYearId = $request->query('academic_year_id');
+
         $totalStudents = Student::count();
         $totalTeachers = Teacher::count();
         $totalCourses = Course::count();
+        $totalPredictions = Prediction::when($semesterId, fn ($q) => $q->where('semester_id', $semesterId))->count();
         $totalDepartments = Department::count();
         $totalClasses = \App\Models\ClassRoom::count();
 
+        // Latest risk assessment per student (avoids duplicate historical counting)
+        $latestRiskIds = RiskAssessment::selectRaw('MAX(id) as id')
+            ->when($semesterId, fn ($q) => $q->where('semester_id', $semesterId))
+            ->groupBy('student_id')
+            ->pluck('id');
+
+        $riskCounts = RiskAssessment::whereIn('id', $latestRiskIds)
+            ->selectRaw('risk_level, COUNT(*) as total')
+            ->groupBy('risk_level')
+            ->pluck('total', 'risk_level');
+
+        $lowRisk = (int) ($riskCounts['low'] ?? 0);
+        $mediumRisk = (int) ($riskCounts['medium'] ?? 0);
+        $highRisk = (int) ($riskCounts['high'] ?? 0);
+        $assessedStudents = $lowRisk + $mediumRisk + $highRisk;
+        $unassessedStudents = max(0, $totalStudents - $assessedStudents);
+
         $riskDistribution = [
-            'low' => RiskAssessment::where('risk_level', 'low')->count(),
-            'medium' => RiskAssessment::where('risk_level', 'medium')->count(),
-            'high' => RiskAssessment::where('risk_level', 'high')->count(),
+            'low' => $lowRisk,
+            'medium' => $mediumRisk,
+            'high' => $highRisk,
+            'unassessed' => $unassessedStudents,
+            'total_assessed' => $assessedStudents,
         ];
+
+        // Real student performance distribution from grades
+        $gradesQuery = Grade::query();
+        if ($semesterId) {
+            $gradesQuery->where('semester_id', $semesterId);
+        } elseif ($academicYearId) {
+            $gradesQuery->whereHas('semester', fn ($q) => $q->where('academic_year_id', $academicYearId));
+        }
+        $grades = $gradesQuery->select('letter_grade', 'total_score')->get();
+
+        $gradeCounts = ['A' => 0, 'B' => 0, 'C' => 0, 'D' => 0, 'F' => 0];
+        foreach ($grades as $g) {
+            $letter = strtoupper(trim((string) $g->letter_grade));
+            $bucket = $letter !== '' ? substr($letter, 0, 1) : '';
+            if (! isset($gradeCounts[$bucket])) {
+                $score = (float) ($g->total_score ?? 0);
+                if ($score >= 85) {
+                    $bucket = 'A';
+                } elseif ($score >= 70) {
+                    $bucket = 'B';
+                } elseif ($score >= 55) {
+                    $bucket = 'C';
+                } elseif ($score >= 40) {
+                    $bucket = 'D';
+                } else {
+                    $bucket = 'F';
+                }
+            }
+            $gradeCounts[$bucket]++;
+        }
+
+        $totalGrades = array_sum($gradeCounts);
+        $gradePercentages = [];
+        foreach ($gradeCounts as $k => $count) {
+            $gradePercentages[$k] = $totalGrades > 0 ? round(($count / $totalGrades) * 100, 1) : 0.0;
+        }
 
         return response()->json([
             'message' => 'Detailed dashboard statistics retrieved successfully.',
@@ -924,9 +1115,13 @@ class DashboardController extends Controller
                 'total_students' => $totalStudents,
                 'total_teachers' => $totalTeachers,
                 'total_courses' => $totalCourses,
+                'total_predictions' => $totalPredictions,
                 'total_departments' => $totalDepartments,
                 'total_classes' => $totalClasses,
                 'risk_distribution' => $riskDistribution,
+                'grade_distribution' => $gradePercentages,
+                'grade_counts' => $gradeCounts,
+                'total_graded_records' => $totalGrades,
                 'user_count' => User::count(),
             ],
         ], 200);

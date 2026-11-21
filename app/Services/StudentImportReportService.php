@@ -37,7 +37,7 @@ class StudentImportReportService
             ? DB::table('programs')->where('department_id', $dept->id)->orderBy('id')->first()
             : null;
         $year = \Illuminate\Support\Facades\Schema::hasTable('academic_years')
-            ? DB::table('academic_years')->orderByDesc('id')->first()
+            ? DB::table('academic_years')->orderByRaw("CASE WHEN status = 'active' THEN 0 ELSE 1 END")->orderByDesc('id')->first()
             : null;
 
         $base = [
@@ -77,14 +77,14 @@ class StudentImportReportService
 
         foreach ($cols as $i => $col) {
             $letter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($i + 1);
+            // Apply Text format at the column level so leading zeros/dates stay text without materializing 5000x23 cells.
+            $sheet->getStyle($letter)->getNumberFormat()->setFormatCode(NumberFormat::FORMAT_TEXT);
             $cell = $sheet->getCell($letter . '1');
             $cell->setValueExplicit($col, DataType::TYPE_STRING);
             $required = in_array($col, StudentImportValidationService::REQUIRED, true);
             $sheet->getStyle($letter . '1')->getFont()->setBold(true);
             $sheet->getStyle($letter . '1')->getFill()->setFillType(Fill::FILL_SOLID)
                 ->getStartColor()->setRGB($required ? 'FDE2E2' : 'E8F0FE');
-            // Text format keeps leading zeros / dates exactly as typed.
-            $sheet->getStyle($letter . '2:' . $letter . '5000')->getNumberFormat()->setFormatCode(NumberFormat::FORMAT_TEXT);
             $sheet->getColumnDimension($letter)->setAutoSize(true);
         }
 
@@ -115,11 +115,11 @@ class StudentImportReportService
             ['4. gender: Male or Female.'],
             ['5. date_of_birth: YYYY-MM-DD (for example 2005-01-31). DD/MM/YYYY is also accepted.'],
             ['6. Phone numbers: digits, optional leading +, spaces or dashes (7-19 characters).'],
-            ['7. Valid department_code values: ' . $deptCodes . ' (BUS is also accepted as an alias for BA).'],
-            ['8. Valid program_code values: ' . $progCodes . '. program_code must belong to the selected department_code.'],
+            ['7. Valid department_code values: ' . $deptCodes . ' (full department names and BUS alias are also accepted).'],
+            ['8. Valid program_code values: ' . $progCodes . ' (full program names are also accepted; program must belong to the department).'],
             ['9. Valid academic_year_code values: ' . $yearCodes . '. Valid semester_code values: 1, 2 (or Semester-1, Semester-2).'],
             ['10. year_level: whole number (1-4), not greater than the program duration.'],
-            ['11. password is OPTIONAL (minimum 8 characters). Leave it blank to have a secure temporary password generated; you can download generated credentials once after the import finishes.'],
+            ['11. All imported student accounts receive the standard initial password: STD@12345 (stored securely with Laravel Hash). Username = Student ID (student_identifier).'],
             ['12. The rows SAMPLE-001 and SAMPLE-002 are fictional examples. DELETE them before uploading.'],
             ['13. Existing students are never overwritten: a row whose identifier already exists is reported as a duplicate.'],
             ['14. Maximum rows per file: ' . config('student_import.max_rows') . '. Maximum file size: ' . config('student_import.max_file_kb') . ' KB.'],

@@ -8,6 +8,7 @@ use App\Models\StudentImport;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
@@ -151,7 +152,7 @@ class StudentImportApiTest extends TestCase
             $this->row('bsr200001'),
             $this->row('bsr200001'),                                  // duplicate inside file
             $this->row($existing->student_code),                      // duplicate in database
-            $this->row('bsr200002', ['khmer_name' => '']),            // missing required
+            $this->row('bsr200002', ['khmer_name' => '', 'english_name' => '']), // missing both names
             $this->row('bsr200003', ['gender' => 'robot']),
             $this->row('bsr200004', ['date_of_birth' => '31/02/2004']),
             $this->row('bsr200005', ['department_code' => 'NOPE']),
@@ -171,7 +172,7 @@ class StudentImportApiTest extends TestCase
 
         $report = $this->actingAs($this->admin)->get("/api/admin/students/imports/{$id}/error-report");
         $report->assertOk();
-        $this->assertStringContainsString('Missing required field: khmer_name', $report->streamedContent());
+        $this->assertStringContainsString('At least one of khmer_name or english_name is required.', $report->streamedContent());
     }
 
     public function test_confirm_imports_students_with_hashed_passwords_and_login_works(): void
@@ -194,23 +195,25 @@ class StudentImportApiTest extends TestCase
         $student = Student::where('student_code', 'bsr300001')->firstOrFail();
         $this->assertSame('student', $student->user->role);
         $this->assertNull($student->user->email);
-        $this->assertTrue(Hash::check('MyPassw0rd!', $student->user->password));
-        $this->assertNotSame('MyPassw0rd!', $student->user->password);
+        $this->assertTrue(Hash::check('STD@12345', $student->user->password));
+        $this->assertNotSame('STD@12345', $student->user->password);
         $this->assertSame('Dad', $student->familyInformation->father_english_name);
         $this->assertSame('Contact', $student->emergencyContacts->first()->name);
         $this->assertNotNull($student->program_id);
         $this->assertNotNull($student->class_id);
 
-        // university identifier is the login
-        $this->postJson('/api/login', ['login_id' => 'bsr300001', 'password' => 'MyPassw0rd!'])
+        // university identifier is the login (all imported students receive standardized STD@12345)
+        $this->postJson('/api/login', ['login_id' => 'bsr300001', 'password' => 'STD@12345'])
             ->assertOk()->assertJsonPath('student_id', 'bsr300001');
 
         // generated credentials downloadable exactly once, never in reports
         $creds = $this->actingAs($this->admin)->get("/api/admin/students/imports/{$id}/credentials")->streamedContent();
+        $this->assertStringContainsString('bsr300001', $creds);
         $this->assertStringContainsString('bsr300002', $creds);
-        $this->assertStringNotContainsString('bsr300001', $creds);
+        $this->assertStringContainsString('STD@12345', $creds);
         $line = explode(',', explode("\n", trim($creds))[1]);
         $temp = trim(end($line), "\" \r");
+        $this->assertSame('STD@12345', $temp);
         $this->postJson('/api/login', ['login_id' => 'bsr300002', 'password' => $temp])->assertOk();
         $again = $this->actingAs($this->admin)->get("/api/admin/students/imports/{$id}/credentials")->streamedContent();
         $this->assertStringNotContainsString('bsr300002', $again);
@@ -287,9 +290,12 @@ class StudentImportApiTest extends TestCase
             'department_id' => $dept->id, 'program_id' => DB::table('programs')->where('code', 'TESTPRG')->value('id'),
             'year_level' => 2, 'academic_year_id' => DB::table('academic_years')->orderByDesc('id')->value('id'),
         ];
-        $res = $this->actingAs($this->admin)->postJson('/api/admin/students', $payload)->assertCreated();
-        $this->assertNotEmpty($res->json('data.temporary_password'));
-        $this->postJson('/api/login', ['login_id' => 'bsr800001', 'password' => $res->json('data.temporary_password')])->assertOk();
+        $res = $this->actingAs($this->admin)->postJson('/api/admin/students', $payload)->assertCreated()
+            ->assertJsonPath('data.username', 'bsr800001')
+            ->assertJsonPath('data.role', 'student')
+            ->assertJsonPath('data.initial_password', 'STD@12345')
+            ->assertJsonPath('data.temporary_password', 'STD@12345');
+        $this->postJson('/api/login', ['login_id' => 'bsr800001', 'password' => 'STD@12345'])->assertOk();
 
         $this->actingAs($this->admin)->postJson('/api/admin/students', $payload)->assertStatus(422)
             ->assertJsonValidationErrors('student_identifier');
@@ -364,33 +370,191 @@ class StudentImportApiTest extends TestCase
         // Admin-approved reset with generated temporary password
         $reset = $this->actingAs($this->admin)->postJson("/api/admin/students/{$student->id}/reset-password")
             ->assertOk()
-            ->assertJsonPath('data.student_identifier', 'SLAS26T999');
+            ->assertJsonPath('data.student_identifier', 'SLAS26T999')
+            ->assertJsonPath('data.username', 'SLAS26T999')
+            ->assertJsonPath('data.role', 'student')
+            ->assertJsonPath('data.password_generated', true);
 
         $tempPassword = $reset->json('data.temporary_password');
-        $this->assertNotEmpty($tempPassword);
+        $this->assertSame('STD@12345', $tempPassword);
 
         // Credentials flag clears once temp password is invalidated
         $this->actingAs($this->admin)->getJson("/api/admin/students/import/{$id}/status")
             ->assertOk()
             ->assertJsonPath('data.has_generated_credentials', false);
 
-        // Login via API succeeds with the new password (and trims whitespace)
-        $this->postJson('/api/login', ['login_id' => ' SLAS26T999 ', 'password' => $tempPassword])
+        // Login via API succeeds with STD@12345 (and trims whitespace)
+        $this->postJson('/api/login', ['login_id' => ' SLAS26T999 ', 'password' => 'STD@12345'])
             ->assertOk()
             ->assertJsonPath('student_id', 'SLAS26T999')
             ->assertJsonPath('user.role', 'student');
+
+        // Also supports resolving by student_code and CSV downloadable credentials format
+        $csvReset = $this->actingAs($this->admin)->post('/api/admin/students/SLAS26T999/reset-password?format=csv');
+        $csvReset->assertOk();
+        $csvText = $csvReset->streamedContent();
+        $this->assertStringContainsString('SLAS26T999', $csvText);
+        $this->assertStringContainsString('STD@12345', $csvText);
+        $csvLines = array_values(array_filter(explode("\n", str_replace("\r", '', trim($csvText)))));
+        $csvCols = str_getcsv($csvLines[1]);
+        $csvTempPass = trim($csvCols[4]);
+        $this->assertSame('STD@12345', $csvTempPass);
+        $this->postJson('/api/login', ['login_id' => 'SLAS26T999', 'password' => $csvTempPass])->assertOk();
 
         // Admin-approved reset with explicit password
         $this->actingAs($this->admin)->postJson("/api/admin/students/{$student->id}/reset-password", [
             'password' => 'NewSecurePass123!',
         ])->assertOk()->assertJsonPath('data.temporary_password', null);
 
-        $this->postJson('/api/login', ['login_id' => 'SLAS26T999', 'password' => $tempPassword])
+        $this->postJson('/api/login', ['login_id' => 'SLAS26T999', 'password' => $csvTempPass])
             ->assertStatus(401);
 
         $this->postJson('/api/login', ['login_id' => 'SLAS26T999', 'password' => 'NewSecurePass123!'])
             ->assertOk()
             ->assertJsonPath('student_id', 'SLAS26T999');
+    }
+
+    public function test_imports_two_students_csv_with_bom_simplified_headers_and_verifies_login_and_dashboard(): void
+    {
+        $csvContent = "\xEF\xBB\xBF" . implode("\r\n", [
+            'khmer_name,english_name,gender,date_of_birth,place_of_birth,student_identifier,father_name,father_phone,mother_name,mother_phone,current_address,department,program,year_level,academic_year',
+            'គឹម សុវណ្ណា,Kim Sovanna,Male,2004-05-18,"Poipet, Banteay Meanchey",SLAS26T101,គឹម សុខ,012000101,លី ស្រីពៅ,012000102,"Poipet, Banteay Meanchey, Cambodia",Computer Science,Test Program,Year 2,' . $this->yearName,
+            'សុខ មុនីរ័ត្ន,Sok Moniroth,Female,2004-11-02,"Serei Saophoan, Banteay Meanchey",SLAS26T102,សុខ វណ្ណា,012000103,ចាន់ ដាលីន,012000104,"Serei Saophoan, Banteay Meanchey, Cambodia",Computer Science,Test Program,Year 2,' . $this->yearName,
+        ]);
+
+        $file = UploadedFile::fake()->createWithContent('SLAS_student_import_test_2_students.csv', $csvContent);
+        $preview = $this->preview($file)->assertCreated();
+        $preview->assertJsonPath('data.total_rows', 2)
+            ->assertJsonPath('data.valid_rows', 2)
+            ->assertJsonPath('data.invalid_rows', 0)
+            ->assertJsonPath('data.duplicate_rows', 0)
+            ->assertJsonPath('data.missing_required_rows', 0)
+            ->assertJsonPath('data.invalid_department_program_rows', 0);
+
+        $id = $preview->json('data.id');
+        $confirm = $this->actingAs($this->admin)->postJson("/api/admin/students/import/{$id}/confirm")
+            ->assertStatus(202)
+            ->assertJsonPath('data.status', 'completed')
+            ->assertJsonPath('data.success_rows', 2)
+            ->assertJsonPath('data.created_user_accounts', 2)
+            ->assertJsonPath('data.has_generated_credentials', true);
+
+        // Verify both student records & linked user accounts
+        foreach (['SLAS26T101', 'SLAS26T102'] as $code) {
+            $student = Student::where('student_code', $code)->firstOrFail();
+            $this->assertNotNull($student->user_id);
+            $this->assertSame('student', $student->user->role);
+            $this->assertSame('2', (string) $student->year_level);
+            $this->assertNotNull($student->familyInformation);
+            $this->assertNotEmpty($student->familyInformation->father_khmer_name);
+        }
+
+        // Retrieve one-time credentials CSV and test login + student dashboard for BOTH students
+        $credsCsv = $this->actingAs($this->admin)->get("/api/admin/students/imports/{$id}/credentials")->streamedContent();
+        $lines = array_values(array_filter(explode("\n", str_replace("\r", '', trim($credsCsv)))));
+        $this->assertCount(3, $lines); // header + 2 students
+
+        foreach (array_slice($lines, 1) as $rowLine) {
+            $cols = str_getcsv($rowLine);
+            $username = trim($cols[0]);
+            $tempPassword = trim($cols[2]);
+
+            $user = Student::where('student_code', $username)->firstOrFail()->user;
+            $this->assertTrue(Hash::check($tempPassword, $user->password));
+
+            Auth::forgetGuards();
+            $login = $this->postJson('/api/login', ['login_id' => $username, 'password' => $tempPassword])
+                ->assertOk()
+                ->assertJsonPath('student_id', $username)
+                ->assertJsonPath('user.role', 'student');
+
+            $token = $login->json('token');
+            Auth::forgetGuards();
+            $this->withToken($token)->getJson('/api/dashboard/student')
+                ->assertOk()
+                ->assertJsonPath('data.student.student_code', $username);
+            $this->withToken($token)->getJson('/api/student/module/dashboard')
+                ->assertOk()
+                ->assertJsonPath('data.profile.student_code', $username);
+        }
+    }
+
+    public function test_validation_breakdown_counts_missing_required_and_invalid_dept_program(): void
+    {
+        $rows = [
+            $this->row('bsr950001', ['khmer_name' => '', 'english_name' => '']),
+            $this->row('bsr950002', ['department_code' => 'BADDEPT']),
+            $this->row('bsr950003', ['program_code' => 'BADPROG']),
+        ];
+
+        $res = $this->preview($this->csvFile($rows))->assertCreated();
+        $res->assertJsonPath('data.total_rows', 3)
+            ->assertJsonPath('data.valid_rows', 0)
+            ->assertJsonPath('data.invalid_rows', 3)
+            ->assertJsonPath('data.missing_required_rows', 1)
+            ->assertJsonPath('data.invalid_department_program_rows', 2);
+    }
+
+    public function test_rollback_when_import_fails_leaves_no_orphan_users_or_students(): void
+    {
+        $id = $this->preview($this->csvFile([$this->row('bsr990001'), $this->row('bsr990002')]))->json('data.id');
+        $usersBefore = User::count();
+        $studentsBefore = Student::count();
+
+        Student::creating(function () {
+            throw new \RuntimeException('Simulated DB constraint failure');
+        });
+
+        try {
+            $res = $this->actingAs($this->admin)->postJson("/api/admin/students/import/{$id}/confirm");
+            $res->assertStatus(500)
+                ->assertJsonPath('data.status', 'failed')
+                ->assertJsonPath('data.success_rows', 0)
+                ->assertJsonPath('data.failed_rows', 2);
+        } finally {
+            Student::flushEventListeners();
+            Student::clearBootedModels();
+        }
+
+        $this->assertSame($usersBefore, User::count());
+        $this->assertSame($studentsBefore, Student::count());
+        $this->assertDatabaseMissing('students', ['student_code' => 'bsr990001']);
+        $this->assertDatabaseMissing('students', ['student_code' => 'bsr990002']);
+    }
+
+    public function test_slas_reset_student_passwords_command_updates_only_students_and_preserves_admin_and_teacher(): void
+    {
+        $teacher = User::where('role', 'teacher')->firstOrFail();
+        $adminHashBefore = $this->admin->password;
+        $teacherHashBefore = $teacher->password;
+
+        $student = Student::firstOrFail();
+        $student->user->createToken('old-student-token');
+        $usersCountBefore = User::count();
+        $studentsCountBefore = Student::count();
+
+        $this->artisan('slas:reset-student-passwords')->assertExitCode(0);
+
+        $this->assertSame($usersCountBefore, User::count());
+        $this->assertSame($studentsCountBefore, Student::count());
+
+        $this->assertSame($adminHashBefore, $this->admin->fresh()->password);
+        $this->assertSame($teacherHashBefore, $teacher->fresh()->password);
+
+        foreach (User::where('role', 'student')->get() as $su) {
+            $this->assertTrue(Hash::check('STD@12345', $su->password));
+            $this->assertSame(0, $su->tokens()->count());
+        }
+
+        // Student can log in directly with STD@12345 and immediately access student dashboard without forced password change
+        $login = $this->postJson('/api/login', ['login_id' => $student->student_code, 'password' => 'STD@12345'])
+            ->assertOk()
+            ->assertJsonPath('user.role', 'student');
+        $token = $login->json('token');
+        Auth::forgetGuards();
+        $this->withToken($token)->getJson('/api/dashboard/student')
+            ->assertOk()
+            ->assertJsonPath('data.student.student_code', $student->student_code);
     }
 
     private function resultData(array $row): array

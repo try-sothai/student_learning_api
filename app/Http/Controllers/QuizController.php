@@ -7,9 +7,11 @@ use Illuminate\Http\Request;
 
 class QuizController extends Controller
 {
+    use \App\Http\Controllers\Concerns\ScopesAssessmentVisibility;
+
     public function index(Request $request)
     {
-        $query = Quiz::with(['course', 'teacher', 'semester']);
+        $query = $this->scopeVisible(Quiz::with(['course', 'teacher', 'semester']), $request, 'quiz');
 
         if ($request->has('course_id')) {
             $query->where('course_id', $request->course_id);
@@ -65,8 +67,10 @@ class QuizController extends Controller
         ], 201);
     }
 
-    public function show(Quiz $quiz)
+    public function show(Request $request, Quiz $quiz)
     {
+        $this->authorizeVisible($quiz, $request, 'quiz');
+
         return response()->json([
             'message' => 'Quiz retrieved successfully.',
             'data' => $quiz->load(['course', 'teacher', 'semester', 'questions']),

@@ -19,6 +19,7 @@ class EnsureUserHasRole
         $allowedRoles = array_map('strtolower', $roles);
 
         abort_unless($user && in_array($userRole, $allowedRoles, true), 403);
+        abort_unless(strtolower((string) ($user->status ?? 'active')) === 'active', 403, 'Account is inactive or deactivated.');
 
         return $next($request);
     }

@@ -88,9 +88,7 @@ class StudentImportService
                     'status' => $status,
                     'data' => json_encode($b['data'], JSON_UNESCAPED_UNICODE),
                     'errors' => $errors ? json_encode($errors, JSON_UNESCAPED_UNICODE) : null,
-                    // The optional supplied password is encrypted only so the confirm step can
-                    // hash it; it is never stored in `data` or exposed.
-                    'temp_password_encrypted' => $b['password'] !== '' ? encrypt('P:' . $b['password']) : null,
+                    'temp_password_encrypted' => null,
                     'created_at' => $now,
                     'updated_at' => $now,
                 ];
@@ -154,22 +152,54 @@ class StudentImportService
     public function readRows(string $fullPath, string $ext): \Generator
     {
         if ($ext === 'csv') {
-            $h = fopen($fullPath, 'rb');
+            $rawContent = @file_get_contents($fullPath);
+            if ($rawContent === false) {
+                throw new ImportFileException('Unable to read the uploaded file.');
+            }
+
+            // Detect UTF-16 BOM and transcode to UTF-8 if exported from legacy Excel
+            if (str_starts_with($rawContent, "\xFF\xFE")) {
+                $rawContent = mb_convert_encoding(substr($rawContent, 2), 'UTF-8', 'UTF-16LE');
+            } elseif (str_starts_with($rawContent, "\xFE\xFF")) {
+                $rawContent = mb_convert_encoding(substr($rawContent, 2), 'UTF-8', 'UTF-16BE');
+            } elseif (str_starts_with($rawContent, "\xEF\xBB\xBF")) {
+                $rawContent = substr($rawContent, 3);
+            }
+
+            // Normalize Mac/Windows line endings so fgetcsv reads every row reliably
+            $rawContent = str_replace(["\r\n", "\r"], "\n", $rawContent);
+
+            $h = fopen('php://temp', 'r+b');
             if (! $h) {
                 throw new ImportFileException('Unable to read the uploaded file.');
             }
+            fwrite($h, $rawContent);
+            rewind($h);
+
             $first = fgets($h);
             rewind($h);
-            // strip UTF-8 BOM
-            if (fread($h, 3) !== "\xEF\xBB\xBF") {
-                rewind($h);
+            $delimiter = ',';
+            if ($first !== false) {
+                $counts = [
+                    ',' => substr_count($first, ','),
+                    ';' => substr_count($first, ';'),
+                    "\t" => substr_count($first, "\t"),
+                ];
+                arsort($counts);
+                $best = array_key_first($counts);
+                if ($counts[$best] > 0) {
+                    $delimiter = $best;
+                }
             }
-            $delimiter = substr_count((string) $first, ';') > substr_count((string) $first, ',') ? ';' : ',';
+
             $headers = null;
             $n = 0;
             while (($line = fgetcsv($h, 0, $delimiter)) !== false) {
                 $n++;
                 if ($headers === null) {
+                    if ($this->blank($line)) {
+                        continue;
+                    }
                     $headers = $this->headers($line);
                     continue;
                 }
@@ -239,19 +269,38 @@ class StudentImportService
             'student_id' => 'student_identifier',
             'student_code' => 'student_identifier',
             'username' => 'student_identifier',
+            'login_id' => 'student_identifier',
             'full_name' => 'english_name',
+            'name' => 'english_name',
+            'student_name' => 'english_name',
+            'dob' => 'date_of_birth',
+            'pob' => 'place_of_birth',
+            'address' => 'current_address',
+            'department' => 'department_code',
+            'dept' => 'department_code',
+            'dept_code' => 'department_code',
+            'department_name' => 'department_code',
+            'program' => 'program_code',
+            'prog' => 'program_code',
+            'prog_code' => 'program_code',
+            'program_name' => 'program_code',
+            'major' => 'program_code',
             'academic_year' => 'academic_year_code',
             'semester' => 'semester_code',
             'emergency_contact_relationship' => 'emergency_relationship',
         ];
         $headers = array_map(function ($h) use ($aliases) {
-            $s = Str::snake(trim((string) $h));
+            $clean = preg_replace('/^\xEF\xBB\xBF|\x{FEFF}/u', '', (string) $h);
+            $s = Str::snake(trim($clean));
             return $aliases[$s] ?? $s;
         }, $cells);
         $missing = array_diff(StudentImportValidationService::REQUIRED, $headers);
         if ($missing) {
             throw new ImportFileException('Missing required column(s): ' . implode(', ', $missing)
                 . '. Download the template for the exact column names.');
+        }
+        if (! in_array('khmer_name', $headers, true) && ! in_array('english_name', $headers, true)) {
+            throw new ImportFileException('Missing required name column: provide khmer_name, english_name, or both.');
         }
 
         return $headers;
@@ -286,46 +335,49 @@ class StudentImportService
      * what AuthController::findUserByLoginId uses for login.
      *
      * @param array $data      normalized row incl. `_ids`
-     * @param ?string $password plain password, or null to generate a temporary one
-     * @return array{student: Student, temp_password: ?string}
+     * @param ?string $password ignored under standardized initial password policy (`STD@12345`)
+     * @return array{student: Student, temp_password: string}
      */
     public function registerStudent(array $data, ?string $password = null): array
     {
         $identifier = $data['student_identifier'];
         $ids = $data['_ids'];
 
-        return DB::transaction(function () use ($data, $identifier, $ids, $password) {
+        return DB::transaction(function () use ($data, $identifier, $ids) {
             $exists = Student::withTrashed()->whereRaw('LOWER(student_code) = ?', [mb_strtolower($identifier)])->exists();
             if ($exists) {
                 throw new DuplicateStudentException("Student identifier '{$identifier}' already exists.");
             }
 
-            $generated = $password === null || $password === '';
-            $plain = $generated ? Str::password(10, true, true, false) : $password;
+            $plain = (string) config('student_import.default_initial_password', 'STD@12345');
+
+            $khmerName = \App\Support\PersonNameHelper::clean($data['khmer_name'] ?? null);
+            $englishName = \App\Support\PersonNameHelper::clean($data['english_name'] ?? null);
+            $displayName = \App\Support\PersonNameHelper::displayName($englishName, $khmerName, null, null, $identifier);
+            $emailRaw = isset($data['email']) ? strtolower(trim((string) $data['email'])) : '';
+            $email = $emailRaw !== '' ? $emailRaw : null;
 
             $user = new User();
             $user->forceFill([
-                'name' => $data['english_name'],
-                'email' => null,
+                'name' => $displayName,
+                'email' => $email,
                 'password' => Hash::make($plain),
                 'role' => 'student',
                 'status' => 'active',
             ])->save();
 
-            $parts = preg_split('/\s+/', trim($data['english_name']));
-            $last = $parts[0];
-            $first = count($parts) > 1 ? implode(' ', array_slice($parts, 1)) : $parts[0];
+            [$first, $last] = \App\Support\PersonNameHelper::splitFirstLast($displayName);
 
             $program = $ids['program_id'] ? DB::table('programs')->where('id', $ids['program_id'])->value('name') : null;
 
             $student = Student::create([
                 'user_id' => $user->id,
                 'student_code' => $identifier,
-                'khmer_name' => $data['khmer_name'],
-                'english_name' => $data['english_name'],
+                'khmer_name' => $khmerName,
+                'english_name' => $englishName,
                 'first_name' => $first,
                 'last_name' => $last,
-                'date_of_birth' => $data['date_of_birth'],
+                'date_of_birth' => ! empty($data['date_of_birth']) ? $data['date_of_birth'] : null,
                 'place_of_birth' => $data['place_of_birth'] ?: null,
                 'gender' => $data['gender'],
                 'address' => $data['current_address'] ?: null,
@@ -361,7 +413,7 @@ class StudentImportService
                 ]);
             }
 
-            return ['student' => $student, 'temp_password' => $generated ? $plain : null];
+            return ['student' => $student, 'temp_password' => $plain];
         });
     }
 

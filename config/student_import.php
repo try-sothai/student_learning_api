@@ -13,4 +13,7 @@ return [
     // Storage disk (private, not web accessible) and directory for uploads.
     'disk' => env('STUDENT_IMPORT_DISK', 'local'),
     'directory' => 'student-imports',
+
+    // Standardized initial password assigned to all student accounts.
+    'default_initial_password' => env('STUDENT_DEFAULT_PASSWORD', 'STD@12345'),
 ];

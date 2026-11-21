@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\DB;
 class StudentImportValidationService
 {
     public const COLUMNS = [
-        'khmer_name', 'english_name', 'gender', 'date_of_birth', 'place_of_birth', 'current_address',
+        'khmer_name', 'english_name', 'email', 'gender', 'date_of_birth', 'place_of_birth', 'current_address',
         'student_identifier', 'password',
         'father_khmer_name', 'father_english_name', 'father_phone',
         'mother_khmer_name', 'mother_english_name', 'mother_phone',
@@ -23,7 +23,7 @@ class StudentImportValidationService
     ];
 
     public const REQUIRED = [
-        'khmer_name', 'english_name', 'gender', 'date_of_birth', 'student_identifier',
+        'gender', 'student_identifier',
         'department_code', 'program_code', 'year_level', 'academic_year_code',
     ];
 
@@ -105,10 +105,13 @@ class StudentImportValidationService
     public function normalize(array $raw): array
     {
         if (empty($raw['student_identifier'])) {
-            $raw['student_identifier'] = $raw['student_id'] ?? $raw['student_code'] ?? $raw['username'] ?? '';
+            $raw['student_identifier'] = $raw['student_id'] ?? $raw['student_code'] ?? $raw['username'] ?? $raw['login_id'] ?? '';
         }
         if (empty($raw['english_name'])) {
-            $raw['english_name'] = $raw['full_name'] ?? $raw['name'] ?? '';
+            $raw['english_name'] = $raw['full_name'] ?? $raw['name'] ?? $raw['student_name'] ?? '';
+        }
+        if (empty($raw['date_of_birth']) && ! empty($raw['dob'])) {
+            $raw['date_of_birth'] = $raw['dob'];
         }
         if (empty($raw['place_of_birth'])) {
             $pobParts = array_filter([
@@ -119,6 +122,8 @@ class StudentImportValidationService
             ], fn ($v) => $v !== '');
             if ($pobParts) {
                 $raw['place_of_birth'] = implode(', ', array_unique($pobParts));
+            } elseif (! empty($raw['pob'])) {
+                $raw['place_of_birth'] = $raw['pob'];
             }
         }
         if (empty($raw['current_address'])) {
@@ -133,6 +138,28 @@ class StudentImportValidationService
             } elseif (! empty($raw['address'])) {
                 $raw['current_address'] = $raw['address'];
             }
+        }
+        if (empty($raw['father_khmer_name']) && empty($raw['father_english_name']) && ! empty($raw['father_name'])) {
+            $father = trim((string) $raw['father_name']);
+            if (preg_match('/\p{Khmer}/u', $father)) {
+                $raw['father_khmer_name'] = $father;
+            } else {
+                $raw['father_english_name'] = $father;
+            }
+        }
+        if (empty($raw['mother_khmer_name']) && empty($raw['mother_english_name']) && ! empty($raw['mother_name'])) {
+            $mother = trim((string) $raw['mother_name']);
+            if (preg_match('/\p{Khmer}/u', $mother)) {
+                $raw['mother_khmer_name'] = $mother;
+            } else {
+                $raw['mother_english_name'] = $mother;
+            }
+        }
+        if (empty($raw['department_code'])) {
+            $raw['department_code'] = $raw['department'] ?? $raw['dept_code'] ?? $raw['dept'] ?? $raw['department_name'] ?? '';
+        }
+        if (empty($raw['program_code'])) {
+            $raw['program_code'] = $raw['program'] ?? $raw['prog_code'] ?? $raw['prog'] ?? $raw['program_name'] ?? $raw['major'] ?? '';
         }
         if (empty($raw['emergency_relationship']) && ! empty($raw['emergency_contact_relationship'])) {
             $raw['emergency_relationship'] = $raw['emergency_contact_relationship'];
@@ -170,6 +197,14 @@ class StudentImportValidationService
             }
         }
 
+        if ($row['khmer_name'] === '' && $row['english_name'] === '') {
+            $errors[] = 'At least one of khmer_name or english_name is required.';
+        }
+
+        if ($row['email'] !== '' && ! filter_var($row['email'], FILTER_VALIDATE_EMAIL)) {
+            $errors[] = 'Invalid email format.';
+        }
+
         $gender = null;
         if ($row['gender'] !== '') {
             $gender = match (mb_strtolower($row['gender'])) {
@@ -203,8 +238,9 @@ class StudentImportValidationService
             }
         }
 
+        // Password column is optional and ignored under standardized initial password policy (STD@12345).
         if ($row['password'] !== '' && mb_strlen($row['password']) < 8) {
-            $errors[] = 'password must be at least 8 characters (or leave blank to generate one)';
+            // Do not fail valid student imports over legacy password cells.
         }
 
         $departmentId = $programId = $academicYearId = $semesterId = null;
@@ -302,13 +338,13 @@ class StudentImportValidationService
         }
 
         $studentCodes = Student::withTrashed()
-            ->whereIn('student_code', $identifiers)
+            ->whereIn(DB::raw('LOWER(student_code)'), $lowered)
             ->pluck('student_code')
             ->map(fn ($c) => mb_strtolower($c))
             ->flip()
             ->all();
 
-        $userEmails = User::whereIn('email', $identifiers)
+        $userEmails = User::whereIn(DB::raw('LOWER(email)'), $lowered)
             ->pluck('email')
             ->filter()
             ->map(fn ($e) => mb_strtolower($e))

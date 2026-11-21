@@ -229,8 +229,15 @@ class LearningAnalyticController extends Controller
         ], 201);
     }
 
-    public function show(LearningAnalytic $learningAnalytic)
+    public function show(Request $request, LearningAnalytic $learningAnalytic)
     {
+        $apiUser = auth('sanctum')->user() ?? $request->user();
+        if ($apiUser && $apiUser->role === 'student') {
+            if (! $apiUser->student || (int) $learningAnalytic->student_id !== (int) $apiUser->student->id) {
+                return response()->json(['message' => 'Unauthorized access.'], 403);
+            }
+        }
+
         return response()->json([
             'message' => 'Learning analytic retrieved successfully.',
             'data' => $learningAnalytic->load(['student.user', 'semester']),

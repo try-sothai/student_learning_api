@@ -68,8 +68,15 @@ class PredictionController extends Controller
         ], 201);
     }
 
-    public function show(Prediction $prediction)
+    public function show(Request $request, Prediction $prediction)
     {
+        $apiUser = auth('sanctum')->user() ?? $request->user();
+        if ($apiUser && $apiUser->role === 'student') {
+            if (! $apiUser->student || (int) $prediction->student_id !== (int) $apiUser->student->id) {
+                return response()->json(['message' => 'Unauthorized access.'], 403);
+            }
+        }
+
         return response()->json([
             'message' => 'Prediction retrieved successfully.',
             'data' => $prediction->load(['student.user', 'course', 'semester']),

@@ -32,11 +32,15 @@ class StudentImportRow extends Model
             'id' => $this->id,
             'row_number' => $this->row_number,
             'student_identifier' => $this->student_identifier,
+            'username' => $this->student_identifier,
+            'student_id' => $this->student_id,
+            'role' => $this->status === 'imported' ? 'student' : null,
             'english_name' => $d['english_name'] ?? null,
             'khmer_name' => $d['khmer_name'] ?? null,
             'department_code' => $d['department_code'] ?? null,
             'program_code' => $d['program_code'] ?? null,
             'status' => $this->status,
+            'has_generated_password' => $this->status === 'imported' && $this->temp_password_encrypted !== null,
             'errors' => $this->errors ?? [],
         ];
     }

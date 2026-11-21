@@ -33,9 +33,11 @@ class TeacherAuthorizationService
                     $tq->where('teachers.id', $teacher->id)
                         ->where('course_offering_teachers.status', 'active');
                 })
-                // Or fallback to direct course.teacher_id legacy relationship
-                ->orWhereHas('course', function (Builder $cq) use ($teacher) {
-                    $cq->where('teacher_id', $teacher->id);
+                // Legacy fallback: course.teacher_id only counts for offerings that have NO
+                // active teacher assigned, so a co-section taught by someone else is never exposed.
+                ->orWhere(function (Builder $legacy) use ($teacher) {
+                    $legacy->whereHas('course', fn (Builder $cq) => $cq->where('teacher_id', $teacher->id))
+                        ->whereDoesntHave('teachers', fn (Builder $tq) => $tq->where('course_offering_teachers.status', 'active'));
                 });
             });
     }
@@ -51,6 +53,46 @@ class TeacherAuthorizationService
             ->pluck('id')
             ->map(fn ($id) => (int) $id)
             ->all();
+    }
+
+    /**
+     * Return array of all authorized course IDs for a teacher.
+     *
+     * @return array<int>
+     */
+    public function getAuthorizedCourseIds(Teacher $teacher): array
+    {
+        $fromOfferings = $this->getAuthorizedOfferingsQuery($teacher)
+            ->pluck('course_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id);
+
+        $direct = Course::where('teacher_id', $teacher->id)
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id);
+
+        return $fromOfferings->merge($direct)->unique()->values()->all();
+    }
+
+    /**
+     * Check if a student is enrolled in any of the teacher's authorized offerings or courses.
+     */
+    public function isStudentAuthorized(Teacher $teacher, int $studentId): bool
+    {
+        $offeringIds = $this->getAuthorizedOfferingIds($teacher);
+        $courseIds = $this->getAuthorizedCourseIds($teacher);
+
+        return \App\Models\CourseEnrollment::where('student_id', $studentId)
+            ->where(function (Builder $q) use ($offeringIds, $courseIds) {
+                $q->whereRaw('1 = 0');
+                if (! empty($offeringIds)) {
+                    $q->orWhereIn('course_offering_id', $offeringIds);
+                }
+                if (! empty($courseIds)) {
+                    $q->orWhereIn('course_id', $courseIds);
+                }
+            })
+            ->exists();
     }
 
     /**

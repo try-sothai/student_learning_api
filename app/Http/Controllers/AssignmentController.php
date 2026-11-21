@@ -7,9 +7,11 @@ use Illuminate\Http\Request;
 
 class AssignmentController extends Controller
 {
+    use \App\Http\Controllers\Concerns\ScopesAssessmentVisibility;
+
     public function index(Request $request)
     {
-        $query = Assignment::with(['course', 'teacher', 'semester']);
+        $query = $this->scopeVisible(Assignment::with(['course', 'teacher', 'semester']), $request, 'assignment');
 
         if ($request->has('course_id')) {
             $query->where('course_id', $request->course_id);
@@ -61,11 +63,25 @@ class AssignmentController extends Controller
         ], 201);
     }
 
-    public function show(Assignment $assignment)
+    public function show(Request $request, Assignment $assignment)
     {
+        $this->authorizeVisible($assignment, $request, 'assignment');
+        if ($request->user()->role === 'student') {
+            $assignment->load([
+                'course',
+                'teacher',
+                'semester',
+                'submissions' => fn ($q) => $q->where('student_id', $request->user()->student->id),
+            ]);
+            $fileService = app(\App\Services\SubmissionFileService::class);
+            $assignment->submissions->each(fn ($sub) => $fileService->decorateStudentSubmissionModel($sub));
+        } else {
+            $assignment->load(['course', 'teacher', 'semester', 'submissions.student.user']);
+        }
+
         return response()->json([
             'message' => 'Assignment retrieved successfully.',
-            'data' => $assignment->load(['course', 'teacher', 'semester', 'submissions.student.user']),
+            'data' => $assignment,
         ], 200);
     }
 

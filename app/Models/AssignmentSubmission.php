@@ -18,6 +18,9 @@ class AssignmentSubmission extends Model
         'feedback',
         'status',
         'file_path',
+        'original_file_name',
+        'mime_type',
+        'file_size',
     ];
 
     protected function casts(): array
@@ -25,6 +28,7 @@ class AssignmentSubmission extends Model
         return [
             'submitted_at' => 'datetime',
             'score' => 'float',
+            'file_size' => 'integer',
         ];
     }
 

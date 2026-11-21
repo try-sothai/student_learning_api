@@ -42,7 +42,7 @@ class AuthApiTest extends TestCase
             ->assertJsonPath('message', 'Invalid credentials.');
     }
 
-    public function test_student_can_register_via_api(): void
+    public function test_public_student_registration_is_disabled(): void
     {
         $response = $this->postJson('/api/register', [
             'student_id' => 'STD999',
@@ -57,12 +57,11 @@ class AuthApiTest extends TestCase
             'major' => 'Software Engineering',
         ]);
 
-        $response
-            ->assertStatus(201)
-            ->assertJsonPath('message', 'Registration successful.')
-            ->assertJsonPath('user.role', 'student');
+        $response->assertStatus(403)
+            ->assertJsonPath('message', 'Public student registration is disabled. Student accounts must be created by an administrator.');
 
-        $this->assertNotEmpty($response->json('token'));
+        $this->assertDatabaseMissing('students', ['student_code' => 'STD999']);
+        $this->assertDatabaseMissing('users', ['email' => 'student999@example.com']);
     }
 
     public function test_student_cannot_change_account_or_personal_fields_via_api(): void
@@ -171,9 +170,11 @@ class AuthApiTest extends TestCase
             ->assertDontSee('name="email"', false);
     }
 
-    public function test_student_record_can_be_created_via_students_api(): void
+    public function test_student_record_can_be_created_via_students_api_by_admin_only(): void
     {
-        $response = $this->postJson('/api/students', [
+        $this->seed();
+
+        $payload = [
             'student_id' => 'STD500',
             'first_name' => 'New',
             'last_name' => 'Student',
@@ -187,7 +188,14 @@ class AuthApiTest extends TestCase
             'academic_year' => '2026-2027',
             'year_level' => 2,
             'semester' => 'Semester 1',
-        ]);
+        ];
+
+        // Public / unauthenticated creation must be rejected
+        $this->postJson('/api/students', $payload)->assertStatus(401);
+
+        $admin = \App\Models\User::where('email', 'admin@slas.com')->firstOrFail();
+
+        $response = $this->actingAs($admin)->postJson('/api/students', $payload);
 
         $response
             ->assertStatus(201)
@@ -197,6 +205,16 @@ class AuthApiTest extends TestCase
         $this->assertDatabaseHas('students', [
             'student_code' => 'STD500',
         ]);
+
+        // Standardized initial student password works immediately without forced password change
+        $loginStd = $this->postJson('/api/login', [
+            'login_id' => 'STD500',
+            'password' => 'STD@12345',
+        ])->assertOk();
+        \Illuminate\Support\Facades\Auth::forgetGuards();
+        $this->withToken($loginStd->json('token'))->getJson('/api/dashboard/student')
+            ->assertOk()
+            ->assertJsonPath('data.student.student_code', 'STD500');
     }
 
     public function test_student_can_change_password_via_api(): void

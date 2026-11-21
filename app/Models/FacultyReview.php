@@ -21,6 +21,11 @@ class FacultyReview extends Model
         return $this->belongsTo(Teacher::class);
     }
 
+    public function semester(): BelongsTo
+    {
+        return $this->belongsTo(Semester::class);
+    }
+
     public function reviewer(): BelongsTo
     {
         return $this->belongsTo(User::class, 'reviewer_id');

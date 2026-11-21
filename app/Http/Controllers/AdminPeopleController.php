@@ -2,8 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Department;
+use App\Models\Specialization;
 use App\Models\Student;
 use App\Models\Teacher;
+use App\Services\AcademicProfileResolver;
+use App\Services\TeacherProfileService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -108,7 +112,7 @@ class AdminPeopleController extends Controller
 
     public function showTeacher(Teacher $teacher): View
     {
-        $teacher->load('user', 'department');
+        $teacher->load('user', 'department', 'office', 'specializationItems');
 
         return $this->showRecord('Teacher', $teacher, [
             'Teacher ID' => $teacher->teacher_id,
@@ -116,32 +120,44 @@ class AdminPeopleController extends Controller
             'Email' => $teacher->user?->email ?? 'Not set',
             'Department' => $teacher->department?->name ?? 'Not set',
             'Position' => $teacher->position,
-            'Specialization' => $teacher->specialization,
+            'Work Type' => $teacher->work_type ?? 'Full-time',
+            'Office Location' => $teacher->office?->display_name ?? 'Not set',
+            'Specialization' => $teacher->specializations !== [] ? implode(', ', $teacher->specializations) : ($teacher->specialization ?? 'Not set'),
+            'Biography' => $teacher->biography ?: 'Not set',
             'Phone' => $teacher->phone,
             'Status' => $teacher->status,
         ], route('admin.teachers'), route('admin.teachers.edit', $teacher), route('admin.teachers.destroy', $teacher));
     }
 
-    public function editTeacher(Teacher $teacher): View
+    public function editTeacher(Teacher $teacher, TeacherProfileService $profiles): View
     {
-        $teacher->load('user', 'department');
+        $teacher->load('user', 'department', 'office', 'specializationItems');
 
-        return $this->editRecord('Teacher', $teacher, route('admin.teachers.update', $teacher), route('admin.teachers'), [
-            $this->field('Teacher ID', 'teacher_id', $teacher->teacher_id, true),
-            $this->field('First name', 'first_name', $teacher->first_name, true),
-            $this->field('Last name', 'last_name', $teacher->last_name, true),
-            $this->field('Email', 'email', $teacher->user?->email, true, 'email'),
-            $this->field('Department', 'department', $teacher->department?->name),
-            $this->field('Position', 'position', $teacher->position),
-            $this->field('Specialization', 'specialization', $teacher->specialization),
-            $this->field('Date of birth', 'date_of_birth', $teacher->date_of_birth, false, 'date'),
-            $this->field('Gender', 'gender', $teacher->gender, false, 'select', ['Male', 'Female']),
-            $this->field('Phone', 'phone', $teacher->phone),
-            $this->field('Status', 'status', $teacher->status, true, 'select', ['active', 'inactive']),
+        return view('pages.admin.people.edit', [
+            'entity' => 'Teacher',
+            'record' => $teacher,
+            'updateUrl' => route('admin.teachers.update', $teacher),
+            'backUrl' => route('admin.teachers'),
+            'officeGroups' => $profiles->groupedOfficeLocations(),
+            'specializationsCatalog' => Specialization::orderBy('name')->get(['id', 'name']),
+            'departments' => Department::orderBy('name')->get(['id', 'name']),
+            'fields' => [
+                $this->field('Teacher ID', 'teacher_id', $teacher->teacher_id, true),
+                $this->field('First name', 'first_name', $teacher->first_name, true),
+                $this->field('Last name', 'last_name', $teacher->last_name, true),
+                $this->field('Email', 'email', $teacher->user?->email, true, 'email'),
+                $this->field('Department', 'department', $teacher->department?->name),
+                $this->field('Position', 'position', $teacher->position),
+                $this->field('Work type', 'work_type', $teacher->work_type ?? 'Full-time', false, 'select', ['Full-time', 'Part-time']),
+                $this->field('Date of birth', 'date_of_birth', $teacher->date_of_birth?->format('Y-m-d'), false, 'date'),
+                $this->field('Gender', 'gender', $teacher->gender, false, 'select', ['Male', 'Female']),
+                $this->field('Phone', 'phone', $teacher->phone),
+                $this->field('Status', 'status', $teacher->status, true, 'select', ['active', 'inactive']),
+            ],
         ]);
     }
 
-    public function updateTeacher(Request $request, Teacher $teacher): RedirectResponse
+    public function updateTeacher(Request $request, Teacher $teacher, AcademicProfileResolver $resolver, TeacherProfileService $profiles): RedirectResponse
     {
         $validated = $request->validate([
             'teacher_id' => ['required', 'string', 'max:50', Rule::unique('teachers', 'teacher_code')->ignore($teacher->id)],
@@ -154,17 +170,51 @@ class AdminPeopleController extends Controller
             'phone' => 'nullable|string|max:30',
             'department' => 'nullable|string|max:255',
             'position' => 'nullable|string|max:255',
-            'specialization' => 'nullable|string|max:255',
+            'work_type' => 'nullable|string|max:50',
+            'office_location_id' => 'nullable|integer|exists:office_locations,id',
+            'office_location' => 'nullable|string|max:191',
+            'specialization' => 'nullable|string|max:1000',
+            'specializations' => 'nullable|array',
+            'specializations.*' => 'nullable|string|max:120',
+            'biography' => 'nullable|string|max:2000',
             'status' => 'required|string|max:50',
         ]);
 
-        DB::transaction(function () use ($teacher, $validated) {
-            $teacher->update(collect($validated)->except(['email', 'password'])->all());
+        DB::transaction(function () use ($request, $teacher, $validated, $resolver, $profiles) {
+            $deptId = $resolver->resolveDepartmentId(null, $validated['department'] ?? null) ?? $teacher->department_id;
+            $officeId = $profiles->resolveOfficeLocationId(
+                $validated['office_location_id'] ?? null,
+                $validated['office_location'] ?? null,
+                $request->user()?->id
+            );
+
+            $teacher->update([
+                'teacher_code' => $validated['teacher_id'],
+                'first_name' => $validated['first_name'],
+                'last_name' => $validated['last_name'],
+                'date_of_birth' => $validated['date_of_birth'] ?? null,
+                'gender' => $validated['gender'] ?? null,
+                'phone' => $validated['phone'] ?? null,
+                'department_id' => $deptId,
+                'position' => $validated['position'] ?? null,
+                'work_type' => $validated['work_type'] ?? $teacher->work_type ?? 'Full-time',
+                'office_location_id' => $officeId,
+                'biography' => $profiles->cleanBiography($validated['biography'] ?? null),
+                'status' => $validated['status'],
+            ]);
+
+            $profiles->syncSpecializations(
+                $teacher,
+                $validated['specializations'] ?? [],
+                $validated['specialization'] ?? null,
+                $request->user()?->id
+            );
 
             if ($teacher->user) {
                 $teacher->user->update([
                     'name' => trim($validated['first_name'] . ' ' . $validated['last_name']),
                     'email' => $validated['email'],
+                    'status' => strtolower($validated['status']) === 'active' ? 'active' : 'inactive',
                     ...(!empty($validated['password']) ? ['password' => Hash::make($validated['password'])] : []),
                 ]);
             }

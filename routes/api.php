@@ -48,32 +48,22 @@ Route::post('/login', [AuthController::class, 'loginApi']);
 Route::apiResource('departments', DepartmentController::class);
 Route::apiResource('academic-years', AcademicYearController::class);
 Route::apiResource('semesters', SemesterController::class);
-Route::apiResource('classes', ClassRoomController::class);
+Route::apiResource('classes', ClassRoomController::class)->parameters(['classes' => 'classRoom']);
+Route::apiResource('buildings', \App\Http\Controllers\BuildingController::class)->only(['index', 'show']);
+Route::apiResource('floors', \App\Http\Controllers\FloorController::class)->only(['index', 'show']);
+Route::apiResource('class-schedules', \App\Http\Controllers\ClassScheduleController::class)->only(['index']);
 
-Route::apiResource('students', StudentController::class);
-Route::apiResource('teachers', TeacherController::class);
+Route::apiResource('students', StudentController::class)->only(['index', 'show']);
+Route::apiResource('teachers', TeacherController::class)->only(['index', 'show']);
 
-Route::apiResource('courses', CourseController::class);
+Route::apiResource('courses', CourseController::class)->only(['index', 'show']);
 Route::apiResource('course-enrollments', CourseEnrollmentController::class);
 
 Route::apiResource('attendance', AttendanceController::class);
 Route::apiResource('attendance-details', AttendanceDetailController::class);
 
-Route::apiResource('assignments', AssignmentController::class);
-Route::apiResource('assignment-submissions', AssignmentSubmissionController::class);
-
-Route::apiResource('quizzes', QuizController::class);
-Route::apiResource('quiz-questions', QuizQuestionController::class);
-Route::apiResource('quiz-attempts', QuizAttemptController::class);
-Route::apiResource('quiz-answers', QuizAnswerController::class);
-
-Route::apiResource('exams', ExamController::class);
-Route::apiResource('exam-results', ExamResultController::class);
-
-Route::apiResource('learning-analytics', LearningAnalyticController::class);
-Route::apiResource('predictions', PredictionController::class);
-Route::apiResource('risk-assessments', RiskAssessmentController::class);
-Route::apiResource('recommendations', RecommendationController::class);
+// Assessment resources are NOT public: they are registered below inside the
+// auth:sanctum group with role/ownership checks (see "Assessment resources").
 
 Route::apiResource('notifications', NotificationController::class);
 Route::apiResource('reports', ReportController::class);
@@ -98,6 +88,37 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/student/assignments', [DashboardController::class, 'studentAssignments']);
     Route::get('/student/quizzes', [DashboardController::class, 'studentQuizzes']);
     Route::get('/student/exams', [DashboardController::class, 'studentExams']);
+
+    // Assessment resources. Reads are scoped per role inside the controllers
+    // (student: enrolled offerings only, teacher: own offerings only, admin: all).
+    Route::apiResource('assignments', AssignmentController::class)->only(['index', 'show']);
+    Route::apiResource('quizzes', QuizController::class)->only(['index', 'show']);
+    Route::apiResource('exams', ExamController::class)->only(['index', 'show']);
+    Route::apiResource('assignment-submissions', AssignmentSubmissionController::class)->only(['index', 'show', 'store']);
+
+    // Student quiz flow (identity from token; one attempt holds all answers).
+    Route::middleware('role:student')->prefix('student')->group(function () {
+        Route::get('/quizzes/{id}', [\App\Http\Controllers\StudentQuizController::class, 'show']);
+        Route::post('/quizzes/{id}/start', [\App\Http\Controllers\StudentQuizController::class, 'start']);
+        Route::put('/quiz-attempts/{attemptId}/answers', [\App\Http\Controllers\StudentQuizController::class, 'saveAnswers']);
+        Route::post('/quiz-attempts/{attemptId}/submit', [\App\Http\Controllers\StudentQuizController::class, 'submit']);
+        Route::get('/quiz-attempts/{attemptId}/review', [\App\Http\Controllers\StudentQuizController::class, 'review']);
+        Route::get('/submissions', [AssignmentSubmissionController::class, 'mySubmissions']);
+        Route::get('/submissions/{assignmentSubmission}', [AssignmentSubmissionController::class, 'showStudentSubmission'])->whereNumber('assignmentSubmission');
+        Route::get('/submissions/{assignmentSubmission}/file', [AssignmentSubmissionController::class, 'streamMySubmissionFile'])->whereNumber('assignmentSubmission');
+    });
+
+    // Raw CRUD / grading tables: administrators only. Teachers use /teacher/* (offering-scoped).
+    Route::middleware('role:admin')->group(function () {
+        Route::apiResource('assignments', AssignmentController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('quizzes', QuizController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('exams', ExamController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('assignment-submissions', AssignmentSubmissionController::class)->only(['update', 'destroy']);
+        Route::apiResource('quiz-questions', QuizQuestionController::class);
+        Route::apiResource('quiz-attempts', QuizAttemptController::class);
+        Route::apiResource('quiz-answers', QuizAnswerController::class);
+        Route::apiResource('exam-results', ExamResultController::class);
+    });
     Route::get('/student/my-analytics', [LearningAnalyticController::class, 'myAnalytics']);
 
     // New Student Module API (Phase 2-9)
@@ -124,21 +145,62 @@ Route::middleware('auth:sanctum')->group(function () {
             Route::get('/dashboard', [\App\Http\Controllers\TeacherModuleController::class, 'dashboard']);
             Route::get('/filters', [\App\Http\Controllers\TeacherModuleController::class, 'filters']);
             Route::get('/analytics', [\App\Http\Controllers\TeacherModuleController::class, 'analytics']);
+            Route::get('/students', [\App\Http\Controllers\TeacherModuleController::class, 'students']);
+            Route::get('/students/{studentId}', [\App\Http\Controllers\TeacherModuleController::class, 'studentDetail']);
+            Route::get('/attendance-overview', [\App\Http\Controllers\TeacherModuleController::class, 'attendanceOverview']);
+            Route::get('/assessments-overview', [\App\Http\Controllers\TeacherModuleController::class, 'assessmentsOverview']);
+            Route::get('/risk-predictions', [\App\Http\Controllers\TeacherModuleController::class, 'riskPredictions']);
+            Route::post('/recommendations', [\App\Http\Controllers\TeacherModuleController::class, 'storeRecommendation']);
+            Route::patch('/recommendations/{id}', [\App\Http\Controllers\TeacherModuleController::class, 'updateRecommendation']);
             Route::get('/course-offerings', [\App\Http\Controllers\TeacherModuleController::class, 'courseOfferings']);
             Route::get('/course-offerings/{id}', [\App\Http\Controllers\TeacherModuleController::class, 'courseOfferingDetail']);
             Route::get('/course-offerings/{id}/students', [\App\Http\Controllers\TeacherModuleController::class, 'courseOfferingStudents']);
             Route::get('/course-offerings/{id}/attendance', [\App\Http\Controllers\TeacherModuleController::class, 'courseOfferingAttendance']);
+            Route::post('/course-offerings/{id}/attendance', [\App\Http\Controllers\TeacherModuleController::class, 'storeAttendance']);
             Route::get('/course-offerings/{id}/assignments', [\App\Http\Controllers\TeacherModuleController::class, 'courseOfferingAssignments']);
+            Route::post('/course-offerings/{id}/assignments', [\App\Http\Controllers\TeacherModuleController::class, 'storeAssignment']);
+            Route::put('/assignments/{assignmentId}', [\App\Http\Controllers\TeacherModuleController::class, 'updateAssignment']);
+            Route::delete('/assignments/{assignmentId}', [\App\Http\Controllers\TeacherModuleController::class, 'deleteAssignment']);
+            Route::get('/submissions/{submissionId}', [\App\Http\Controllers\TeacherModuleController::class, 'showSubmission'])->whereNumber('submissionId');
+            Route::get('/submissions/{submissionId}/file', [\App\Http\Controllers\TeacherModuleController::class, 'streamSubmissionFile'])->whereNumber('submissionId');
+            Route::post('/submissions/{submissionId}/grade', [\App\Http\Controllers\TeacherModuleController::class, 'gradeSubmission'])->whereNumber('submissionId');
             Route::get('/course-offerings/{id}/quizzes', [\App\Http\Controllers\TeacherModuleController::class, 'courseOfferingQuizzes']);
+            Route::post('/course-offerings/{id}/quizzes', [\App\Http\Controllers\TeacherModuleController::class, 'storeQuiz']);
+
+            // Teaching assignments + offering-scoped assessment management
+            $ta = \App\Http\Controllers\TeacherAssessmentController::class;
+            Route::get('/teaching-assignments', [$ta, 'teachingAssignments']);
+            Route::get('/course-offerings/{id}/exams', [$ta, 'offeringExams']);
+            Route::post('/course-offerings/{id}/exams', [$ta, 'storeExam']);
+            Route::put('/exams/{examId}', [$ta, 'updateExam']);
+            Route::delete('/exams/{examId}', [$ta, 'deleteExam']);
+            Route::get('/quizzes/{quizId}', [$ta, 'showQuiz']);
+            Route::put('/quizzes/{quizId}', [$ta, 'updateQuiz']);
+            Route::delete('/quizzes/{quizId}', [$ta, 'deleteQuiz']);
+            Route::get('/quizzes/{quizId}/attempts', [$ta, 'quizAttempts']);
+            Route::get('/quiz-attempts/{attemptId}', [$ta, 'showQuizAttempt']);
+            Route::post('/quizzes/{quizId}/questions', [$ta, 'storeQuestion']);
+            Route::put('/quizzes/{quizId}/questions/reorder', [$ta, 'reorderQuestions']);
+            Route::patch('/quizzes/{quizId}/publish', [$ta, 'publishQuiz']);
+            Route::put('/quiz-questions/{questionId}', [$ta, 'updateQuestion']);
+            Route::delete('/quiz-questions/{questionId}', [$ta, 'deleteQuestion']);
+            Route::post('/quiz-questions/{questionId}/duplicate', [$ta, 'duplicateQuestion']);
+            Route::patch('/quiz-answers/{answerId}/grade', [$ta, 'gradeAnswer']);
             Route::get('/course-offerings/{id}/scores', [\App\Http\Controllers\TeacherModuleController::class, 'courseOfferingScores']);
+            Route::post('/course-offerings/{id}/scores', [\App\Http\Controllers\TeacherModuleController::class, 'storeScore']);
         });
     });
 
     Route::get('/notifications/unread-count', [NotificationController::class, 'apiUnreadCount']);
+    Route::get('/my-schedules', [\App\Http\Controllers\ClassScheduleController::class, 'mySchedules']);
 
     // Admin Only Protected Endpoints
     Route::middleware('role:admin')->group(function () {
+        Route::apiResource('buildings', \App\Http\Controllers\BuildingController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('floors', \App\Http\Controllers\FloorController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('class-schedules', \App\Http\Controllers\ClassScheduleController::class)->only(['store', 'update', 'destroy']);
         Route::get('/dashboard/admin', [DashboardController::class, 'admin']);
+        Route::get('/admin/academic-structure', [ClassRoomController::class, 'academicStructure']);
         Route::get('/admin/dashboard/overview', [DashboardController::class, 'adminOverview']);
         Route::get('/admin/dashboard/user-growth', [DashboardController::class, 'adminUserGrowth']);
         Route::get('/admin/dashboard/system-status', [DashboardController::class, 'adminSystemStatus']);
@@ -149,6 +211,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/admin/analytics/performance', [\App\Http\Controllers\AdminAnalyticsController::class, 'performance']);
         Route::get('/admin/analytics/attendance', [\App\Http\Controllers\AdminAnalyticsController::class, 'attendance']);
         Route::get('/admin/analytics/student-risk', [\App\Http\Controllers\AdminAnalyticsController::class, 'studentRisk']);
+        Route::get('/admin/analytics/model-evaluation', [\App\Http\Controllers\AdminAnalyticsController::class, 'modelEvaluation']);
 
         Route::get('/admin/users/statistics', [\App\Http\Controllers\AdminUserController::class, 'statistics']);
         Route::get('/admin/users', [\App\Http\Controllers\AdminUserController::class, 'index']);
@@ -164,6 +227,18 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/admin/users/{user}/notes/{noteId}', [\App\Http\Controllers\StudentNoteController::class, 'destroy']);
 
         Route::apiResource('admins', AdminController::class);
+        Route::apiResource('students', StudentController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('teachers', TeacherController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('courses', CourseController::class)->only(['store', 'update', 'destroy']);
+        Route::patch('/courses/{course}/status', [CourseController::class, 'updateStatus']);
+
+        // Teacher profile catalogs, account repair & bulk import
+        Route::get('/admin/teachers/lookups', [\App\Http\Controllers\TeacherProfileCatalogController::class, 'lookups']);
+        Route::post('/admin/teachers/{teacher}/provision-account', [TeacherController::class, 'provisionAccount']);
+        Route::get('/admin/teachers/import/template', [\App\Http\Controllers\TeacherImportController::class, 'template']);
+        Route::post('/admin/teachers/import', [\App\Http\Controllers\TeacherImportController::class, 'import']);
+        Route::post('/admin/office-locations', [\App\Http\Controllers\TeacherProfileCatalogController::class, 'storeOfficeLocation']);
+        Route::post('/admin/specializations', [\App\Http\Controllers\TeacherProfileCatalogController::class, 'storeSpecialization']);
 
         // Student bulk import / export / university Add Student form
         Route::prefix('admin/students')->group(function () {
@@ -191,6 +266,28 @@ Route::middleware('auth:sanctum')->group(function () {
             Route::get('imports/{import}/credentials', [$import, 'credentials']);
         });
 
+        // Reports & Analytics Module (Overview, Workload, Courses, Report Generation & Export)
+        Route::prefix('admin/reports-analytics')->controller(\App\Http\Controllers\AdminReportsAnalyticsController::class)->group(function () {
+            Route::get('/lookups', 'lookups');
+            Route::get('/overview', 'overview');
+            Route::get('/attendance', 'attendance');
+            Route::get('/teachers', 'teachers');
+            Route::get('/courses', 'courses');
+            Route::match(['get', 'post'], '/generate', 'generate');
+            Route::match(['get', 'post'], '/export', 'export');
+        });
+
+        // Class Bulk Student Enrollment & CSV/Excel Import
+        Route::prefix('admin/class-enrollments')->controller(\App\Http\Controllers\ClassEnrollmentController::class)->group(function () {
+            Route::get('/', 'index');
+            Route::get('/lookups', 'lookups');
+            Route::get('/classes/{classRoom}/students', 'studentsForClass');
+            Route::post('/classes/{classRoom}/bulk-enroll', 'bulkEnroll');
+            Route::get('/template', 'templateCsv');
+            Route::post('/import/preview', 'importPreview');
+            Route::post('/import/confirm', 'importConfirm');
+        });
+
         // Faculty Evaluators (teachers + assignments + reviews)
         Route::prefix('faculty-evaluators')->controller(\App\Http\Controllers\FacultyEvaluatorController::class)->group(function () {
             Route::get('/', 'index');
@@ -211,4 +308,27 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('grades', GradeController::class);
     Route::apiResource('gpa-records', GpaRecordController::class);
     Route::apiResource('performance-records', PerformanceRecordController::class);
+
+    // Protected Analytics, Predictions, Risk Assessments & Recommendations
+    Route::apiResource('learning-analytics', LearningAnalyticController::class)->only(['index', 'show']);
+    Route::apiResource('predictions', PredictionController::class)->only(['index', 'show']);
+    Route::apiResource('risk-assessments', RiskAssessmentController::class)->only(['index', 'show']);
+    Route::apiResource('recommendations', RecommendationController::class)->only(['index', 'show', 'update']);
+
+    Route::middleware('role:teacher,admin')->group(function () {
+        Route::apiResource('learning-analytics', LearningAnalyticController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('predictions', PredictionController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('risk-assessments', RiskAssessmentController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('recommendations', RecommendationController::class)->only(['store', 'destroy']);
+
+        Route::get('/incidents', [\App\Http\Controllers\IncidentController::class, 'index']);
+        Route::get('/incidents/{incident}', [\App\Http\Controllers\IncidentController::class, 'show']);
+        Route::post('/incidents', [\App\Http\Controllers\IncidentController::class, 'store']);
+    });
+
+    Route::middleware('role:admin')->group(function () {
+        Route::put('/incidents/{incident}', [\App\Http\Controllers\IncidentController::class, 'update']);
+        Route::patch('/incidents/{incident}', [\App\Http\Controllers\IncidentController::class, 'update']);
+        Route::delete('/incidents/{incident}', [\App\Http\Controllers\IncidentController::class, 'destroy']);
+    });
 });

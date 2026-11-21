@@ -53,6 +53,35 @@ class StudentImport extends Model
         $processed = $this->processed_rows;
         $target = max(1, $this->valid_rows);
 
+        $missingRequiredRows = 0;
+        $invalidDeptProgRows = 0;
+        if ($this->invalid_rows > 0 || $this->failed_rows > 0) {
+            $this->rows()
+                ->whereIn('status', ['invalid', 'failed'])
+                ->whereNotNull('errors')
+                ->get(['errors'])
+                ->each(function (StudentImportRow $row) use (&$missingRequiredRows, &$invalidDeptProgRows) {
+                    $hasMissing = false;
+                    $hasDeptProg = false;
+                    foreach ($row->errors ?? [] as $err) {
+                        $msg = (string) $err;
+                        if (str_contains($msg, 'Missing required field:')
+                            || str_contains($msg, 'At least one of khmer_name or english_name')) {
+                            $hasMissing = true;
+                        }
+                        if (str_contains($msg, 'department_code') || str_contains($msg, 'program_code')) {
+                            $hasDeptProg = true;
+                        }
+                    }
+                    if ($hasMissing) {
+                        $missingRequiredRows++;
+                    }
+                    if ($hasDeptProg) {
+                        $invalidDeptProgRows++;
+                    }
+                });
+        }
+
         return [
             'id' => $this->id,
             'original_filename' => $this->original_filename,
@@ -64,9 +93,12 @@ class StudentImport extends Model
             'valid_rows' => $this->valid_rows,
             'invalid_rows' => $this->invalid_rows,
             'duplicate_rows' => $this->duplicate_rows,
+            'missing_required_rows' => $missingRequiredRows,
+            'invalid_department_program_rows' => $invalidDeptProgRows,
             'new_students' => $this->valid_rows,
             'processed_rows' => $processed,
             'success_rows' => $this->success_rows,
+            'created_user_accounts' => $this->success_rows,
             'failed_rows' => $this->failed_rows,
             'skipped_rows' => $this->skipped_rows,
             'progress_percent' => $this->isFinished() && $this->status !== self::FAILED

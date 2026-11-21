@@ -79,7 +79,11 @@ class SlasApiTest extends TestCase
 
     public function test_can_retrieve_learning_analytics(): void
     {
-        $response = $this->getJson('/api/learning-analytics');
+        // Endpoint is now protected by auth:sanctum
+        $this->getJson('/api/learning-analytics')->assertStatus(401);
+
+        $admin = User::where('role', 'admin')->first();
+        $response = $this->actingAs($admin)->getJson('/api/learning-analytics');
 
         $response->assertOk()
             ->assertJsonPath('message', 'Learning analytics retrieved successfully.');
@@ -87,7 +91,10 @@ class SlasApiTest extends TestCase
 
     public function test_can_retrieve_risk_assessments(): void
     {
-        $response = $this->getJson('/api/risk-assessments');
+        $this->getJson('/api/risk-assessments')->assertStatus(401);
+
+        $admin = User::where('role', 'admin')->first();
+        $response = $this->actingAs($admin)->getJson('/api/risk-assessments');
 
         $response->assertOk()
             ->assertJsonPath('message', 'Risk assessments retrieved successfully.');
@@ -95,7 +102,10 @@ class SlasApiTest extends TestCase
 
     public function test_can_retrieve_predictions(): void
     {
-        $response = $this->getJson('/api/predictions');
+        $this->getJson('/api/predictions')->assertStatus(401);
+
+        $admin = User::where('role', 'admin')->first();
+        $response = $this->actingAs($admin)->getJson('/api/predictions');
 
         $response->assertOk()
             ->assertJsonPath('message', 'Predictions retrieved successfully.');

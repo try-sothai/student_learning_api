@@ -12,6 +12,8 @@ class Exam extends Model
     use HasFactory;
 
     protected $fillable = [
+        'course_offering_id',
+        'venue',
         'course_id',
         'teacher_id',
         'semester_id',
@@ -27,10 +29,15 @@ class Exam extends Model
     protected function casts(): array
     {
         return [
-            'exam_date' => 'date',
+            'exam_date' => 'date:Y-m-d',
             'total_score' => 'float',
             'duration_minutes' => 'integer',
         ];
+    }
+
+    public function courseOffering(): BelongsTo
+    {
+        return $this->belongsTo(CourseOffering::class);
     }
 
     public function course(): BelongsTo

@@ -65,11 +65,22 @@ class StudentImportJob implements ShouldQueue
             $import->update(['status' => StudentImport::CANCELLED, 'finished_at' => now()]);
             StudentImportRow::where('student_import_id', $import->id)->update(['temp_password_encrypted' => null]);
         } else {
-            $import->update([
-                'status' => $import->failed_rows > 0 || $import->skipped_rows > 0
-                    ? StudentImport::COMPLETED_WITH_ERRORS : StudentImport::COMPLETED,
-                'finished_at' => now(),
-            ]);
+            $runtimeFailed = StudentImportRow::where('student_import_id', $import->id)
+                ->where('status', 'failed')
+                ->count();
+            if ($import->success_rows === 0 && $runtimeFailed > 0) {
+                $import->update([
+                    'status' => StudentImport::FAILED,
+                    'failure_message' => 'Import failed: student records could not be saved and were rolled back.',
+                    'finished_at' => now(),
+                ]);
+            } else {
+                $import->update([
+                    'status' => $import->failed_rows > 0 || $import->skipped_rows > 0
+                        ? StudentImport::COMPLETED_WITH_ERRORS : StudentImport::COMPLETED,
+                    'finished_at' => now(),
+                ]);
+            }
         }
 
         $service->deleteStoredFile($import);

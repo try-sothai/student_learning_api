@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Grade;
+use App\Services\TeacherAuthorizationService;
 use Illuminate\Http\Request;
 
 class GradeController extends Controller
@@ -13,10 +14,33 @@ class GradeController extends Controller
 
         $user = $request->user();
         if ($user && $user->role === 'student') {
-            if (!$user->student) {
+            if (! $user->student) {
                 return response()->json(['message' => 'Student profile not found.'], 404);
             }
             $query->where('student_id', $user->student->id);
+        } elseif ($user && $user->role === 'teacher') {
+            $authService = app(TeacherAuthorizationService::class);
+            $teacher = $authService->resolveTeacher($user);
+            if (! $teacher) {
+                return response()->json(['message' => 'Teacher profile not found.'], 404);
+            }
+            if ($request->filled('course_id') && ! $authService->isCourseAuthorized($teacher, (int) $request->course_id)) {
+                return response()->json(['message' => 'Unauthorized access to course grades.'], 403);
+            }
+            $courseIds = $authService->getAuthorizedCourseIds($teacher);
+            $offeringIds = $authService->getAuthorizedOfferingIds($teacher);
+            $query->where(function ($q) use ($courseIds, $offeringIds) {
+                $q->whereRaw('1 = 0');
+                if (! empty($courseIds)) {
+                    $q->orWhereIn('course_id', $courseIds);
+                }
+                if (! empty($offeringIds)) {
+                    $q->orWhereIn('course_offering_id', $offeringIds);
+                }
+            });
+            if ($request->has('student_id')) {
+                $query->where('student_id', $request->student_id);
+            }
         } elseif ($request->has('student_id')) {
             $query->where('student_id', $request->student_id);
         }
@@ -40,13 +64,14 @@ class GradeController extends Controller
     public function store(Request $request)
     {
         $user = $request->user();
-        if (!$user || !in_array($user->role, ['admin', 'teacher'])) {
+        if (! $user || ! in_array($user->role, ['admin', 'teacher'])) {
             return response()->json(['message' => 'Unauthorized action.'], 403);
         }
 
         $validated = $request->validate([
             'student_id' => 'required|integer|exists:students,id',
             'course_id' => 'required|integer|exists:courses,id',
+            'course_offering_id' => 'nullable|integer|exists:course_offerings,id',
             'semester_id' => 'required|integer|exists:semesters,id',
             'assignment_score' => 'nullable|numeric|min:0|max:100',
             'quiz_score' => 'nullable|numeric|min:0|max:100',
@@ -58,6 +83,17 @@ class GradeController extends Controller
             'grade_point' => 'nullable|numeric|min:0|max:4.0',
             'status' => 'nullable|string|in:draft,submitted,finalized',
         ]);
+
+        if ($user->role === 'teacher') {
+            $authService = app(TeacherAuthorizationService::class);
+            $teacher = $authService->resolveTeacher($user);
+            if (! $teacher || ! $authService->isCourseAuthorized($teacher, (int) $validated['course_id'])) {
+                return response()->json(['message' => 'Unauthorized to record grades for this course.'], 403);
+            }
+            if (! empty($validated['course_offering_id']) && ! $authService->isOfferingAuthorized($teacher, (int) $validated['course_offering_id'])) {
+                return response()->json(['message' => 'Unauthorized to record grades for this course offering.'], 403);
+            }
+        }
 
         $grade = Grade::updateOrCreate(
             [
@@ -78,10 +114,16 @@ class GradeController extends Controller
     {
         $user = request()->user();
         if ($user && $user->role === 'student') {
-            if (!$user->student) {
+            if (! $user->student) {
                 return response()->json(['message' => 'Student profile not found.'], 404);
             }
-            if ($grade->student_id !== $user->student->id) {
+            if ((int) $grade->student_id !== (int) $user->student->id) {
+                return response()->json(['message' => 'Unauthorized access.'], 403);
+            }
+        } elseif ($user && $user->role === 'teacher') {
+            $authService = app(TeacherAuthorizationService::class);
+            $teacher = $authService->resolveTeacher($user);
+            if (! $teacher || ! $authService->isCourseAuthorized($teacher, (int) $grade->course_id)) {
                 return response()->json(['message' => 'Unauthorized access.'], 403);
             }
         }
@@ -95,8 +137,16 @@ class GradeController extends Controller
     public function update(Request $request, Grade $grade)
     {
         $user = $request->user();
-        if (!$user || !in_array($user->role, ['admin', 'teacher'])) {
+        if (! $user || ! in_array($user->role, ['admin', 'teacher'])) {
             return response()->json(['message' => 'Unauthorized action.'], 403);
+        }
+
+        if ($user->role === 'teacher') {
+            $authService = app(TeacherAuthorizationService::class);
+            $teacher = $authService->resolveTeacher($user);
+            if (! $teacher || ! $authService->isCourseAuthorized($teacher, (int) $grade->course_id)) {
+                return response()->json(['message' => 'Unauthorized to modify grades for this course.'], 403);
+            }
         }
 
         $validated = $request->validate([
@@ -122,8 +172,16 @@ class GradeController extends Controller
     public function destroy(Grade $grade)
     {
         $user = request()->user();
-        if (!$user || !in_array($user->role, ['admin', 'teacher'])) {
+        if (! $user || ! in_array($user->role, ['admin', 'teacher'])) {
             return response()->json(['message' => 'Unauthorized action.'], 403);
+        }
+
+        if ($user->role === 'teacher') {
+            $authService = app(TeacherAuthorizationService::class);
+            $teacher = $authService->resolveTeacher($user);
+            if (! $teacher || ! $authService->isCourseAuthorized($teacher, (int) $grade->course_id)) {
+                return response()->json(['message' => 'Unauthorized to delete grades for this course.'], 403);
+            }
         }
 
         $grade->delete();

@@ -32,6 +32,17 @@
                         @endif
                     </div>
                 @endforeach
+                @if($entity === 'Teacher')
+                    @include('components.admin.teacher-profile-fields', [
+                        'prefix' => 'edit_',
+                        'officeGroups' => $officeGroups ?? [],
+                        'specializations' => $specializationsCatalog ?? [],
+                        'selectedOfficeId' => $record->office_location_id,
+                        'selectedOfficeLabel' => $record->office?->display_name ?? '',
+                        'selectedSpecs' => $record->specializations ?? [],
+                        'biographyVal' => $record->biography ?? '',
+                    ])
+                @endif
                 <div class="col-md-6">
                     <label for="password" class="form-label">New password <span class="text-muted">(leave blank to keep current)</span></label>
                     <input id="password" name="password" type="password" class="form-control" minlength="8" autocomplete="new-password">

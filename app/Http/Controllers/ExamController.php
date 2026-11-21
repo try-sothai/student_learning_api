@@ -7,9 +7,11 @@ use Illuminate\Http\Request;
 
 class ExamController extends Controller
 {
+    use \App\Http\Controllers\Concerns\ScopesAssessmentVisibility;
+
     public function index(Request $request)
     {
-        $query = Exam::with(['course', 'teacher', 'semester']);
+        $query = $this->scopeVisible(Exam::with(['course', 'teacher', 'semester']), $request, 'exam');
 
         if ($request->has('course_id')) {
             $query->where('course_id', $request->course_id);
@@ -65,11 +67,16 @@ class ExamController extends Controller
         ], 201);
     }
 
-    public function show(Exam $exam)
+    public function show(Request $request, Exam $exam)
     {
+        $this->authorizeVisible($exam, $request, 'exam');
+        $request->user()->role === 'student'
+            ? $exam->load(['course', 'teacher', 'semester', 'results' => fn ($q) => $q->where('student_id', $request->user()->student->id)])
+            : $exam->load(['course', 'teacher', 'semester', 'results.student.user']);
+
         return response()->json([
             'message' => 'Exam retrieved successfully.',
-            'data' => $exam->load(['course', 'teacher', 'semester', 'results.student.user']),
+            'data' => $exam,
         ], 200);
     }
 

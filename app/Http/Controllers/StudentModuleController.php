@@ -405,15 +405,16 @@ class StudentModuleController extends Controller
 
         foreach ($assignments as $a) {
             $sub = $a->submissions->first();
+            $isPublished = $sub && $sub->score !== null && strtolower((string) $sub->status) === 'graded';
             $breakdown->push([
                 'component_name' => $a->title,
                 'type' => $a->assignment_type,
-                'earned_score' => $sub ? $sub->score : null,
+                'earned_score' => $isPublished ? $sub->score : null,
                 'maximum_score' => $a->total_score,
                 'weight' => null, // Dynamic if weight was tracked
                 'assessment_date' => $a->due_date,
-                'publication_status' => ($sub && $sub->score !== null) ? 'Published' : 'Pending',
-                'teacher_feedback' => $sub ? $sub->feedback : null
+                'publication_status' => $isPublished ? 'Published' : 'Pending',
+                'teacher_feedback' => $isPublished ? $sub->feedback : null
             ]);
         }
 

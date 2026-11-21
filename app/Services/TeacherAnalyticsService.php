@@ -94,14 +94,23 @@ class TeacherAnalyticsService
      */
     protected function calculateAttendanceEngagement(array $offeringIds, array $courseIds, Teacher $teacher): array
     {
+        if (empty($offeringIds) && empty($courseIds)) {
+            return [
+                'activity' => 'Attendance',
+                'completed' => null,
+                'late' => null,
+                'missed' => null,
+                'total_events' => 0,
+                'has_data' => false,
+            ];
+        }
+
         $attendanceQuery = Attendance::query()
-            ->where(function (Builder $q) use ($offeringIds, $courseIds, $teacher) {
+            ->where(function (Builder $q) use ($offeringIds, $courseIds) {
                 if (! empty($offeringIds)) {
                     $q->whereIn('course_offering_id', $offeringIds);
                 } elseif (! empty($courseIds)) {
                     $q->whereIn('course_id', $courseIds);
-                } else {
-                    $q->where('teacher_id', $teacher->id);
                 }
             })
             ->where('status', 'completed');
@@ -171,6 +180,17 @@ class TeacherAnalyticsService
         bool $isHomework
     ): array {
         $activityName = $isHomework ? 'Homework' : 'Assignment';
+
+        if (empty($offeringIds) && empty($courseIds)) {
+            return [
+                'activity' => $activityName,
+                'completed' => null,
+                'late' => null,
+                'missed' => null,
+                'total_events' => 0,
+                'has_data' => false,
+            ];
+        }
 
         $assignmentsQuery = Assignment::query()
             ->where(function (Builder $q) use ($offeringIds, $courseIds) {
@@ -260,6 +280,17 @@ class TeacherAnalyticsService
      */
     protected function calculateQuizEngagement(array $offeringIds, array $courseIds, int $enrolledCount): array
     {
+        if (empty($offeringIds) && empty($courseIds)) {
+            return [
+                'activity' => 'Quiz',
+                'completed' => null,
+                'late' => null,
+                'missed' => null,
+                'total_events' => 0,
+                'has_data' => false,
+            ];
+        }
+
         $quizzesQuery = Quiz::query()
             ->where(function (Builder $q) use ($offeringIds, $courseIds) {
                 if (! empty($offeringIds)) {

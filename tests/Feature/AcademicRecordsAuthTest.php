@@ -30,6 +30,14 @@ class AcademicRecordsAuthTest extends TestCase
         $this->student2 = Student::create(['user_id' => $this->studentUser2->id, 'student_id' => 'STD02', 'first_name' => 'S2', 'last_name' => 'L', 'date_of_birth' => '2000-01-01', 'gender' => 'Female']);
 
         $this->teacherUser = User::create(['name' => 'T1', 'email' => 't1@test.com', 'password' => 'pwd', 'role' => 'teacher']);
+        $this->teacher = \App\Models\Teacher::create([
+            'user_id' => $this->teacherUser->id,
+            'teacher_code' => 'TCH099',
+            'first_name' => 'T1',
+            'last_name' => 'Test',
+            'status' => 'active',
+        ]);
+        $this->course->update(['teacher_id' => $this->teacher->id]);
         $this->adminUser = User::create(['name' => 'A1', 'email' => 'a1@test.com', 'password' => 'pwd', 'role' => 'admin']);
 
         $this->missingProfileUser = User::create(['name' => 'S3', 'email' => 's3@test.com', 'password' => 'pwd', 'role' => 'student']);

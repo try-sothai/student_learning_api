@@ -16,11 +16,16 @@ use App\Models\StudentNote;
 use App\Models\Teacher;
 use App\Models\User;
 use App\Services\AcademicProfileResolver;
+use App\Services\TeacherAccountService;
+use App\Services\TeacherProfileService;
+use App\Support\PersonNameHelper;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class AdminUserController extends Controller
 {
@@ -73,6 +78,8 @@ class AdminUserController extends Controller
             'student.familyInformation',
             'student.emergencyContacts',
             'teacher.department',
+            'teacher.office',
+            'teacher.specializationItems',
             'teacher.courses',
             'teacher.classes',
             'admin',
@@ -134,7 +141,9 @@ class AdminUserController extends Controller
                   ->orWhereHas('teacher', function ($tq) use ($search) {
                       $tq->where('teacher_code', 'like', "%{$search}%")
                         ->orWhere('first_name', 'like', "%{$search}%")
-                        ->orWhere('last_name', 'like', "%{$search}%");
+                        ->orWhere('last_name', 'like', "%{$search}%")
+                        ->orWhere('specialization', 'like', "%{$search}%")
+                        ->orWhereHas('office', fn ($oq) => $oq->where('display_name', 'like', "%{$search}%"));
                   })
                   ->orWhereHas('admin', function ($aq) use ($search) {
                       $aq->where('admin_code', 'like', "%{$search}%")
@@ -200,6 +209,8 @@ class AdminUserController extends Controller
             'student.courses.teacher.user',
             'student.gpaRecords.semester',
             'teacher.department',
+            'teacher.office',
+            'teacher.specializationItems',
             'teacher.courses',
             'teacher.classes',
             'admin',
@@ -231,7 +242,12 @@ class AdminUserController extends Controller
         $khmerName = '';
         $englishName = '';
         $position = '';
+        $workType = '';
+        $officeLocationId = null;
+        $officeLocation = '';
+        $biography = '';
         $specialization = '';
+        $specializations = [];
         $familyInfo = null;
         $emergencyContact = null;
         $attendanceSummary = null;
@@ -258,7 +274,14 @@ class AdminUserController extends Controller
             $placeOfBirth = $s->place_of_birth ?? '';
             $address = $s->address ?? '';
             $khmerName = $s->khmer_name ?? '';
-            $englishName = $s->english_name ?: ($user->name ?: trim($s->first_name . ' ' . $s->last_name));
+            $englishName = $s->english_name ?? '';
+            $resolvedDisplayName = PersonNameHelper::displayName(
+                $s->english_name,
+                $s->khmer_name,
+                $s->first_name,
+                $s->last_name,
+                $user->name ?: $code
+            );
             $familyInfo = $s->familyInformation;
             $emergencyContact = $s->emergencyContacts?->first();
 
@@ -340,14 +363,28 @@ class AdminUserController extends Controller
         } elseif ($user->teacher) {
             $t = $user->teacher;
             $code = $t->teacher_code ?? $t->teacher_id ?? ('TCH' . str_pad((string) $t->id, 3, '0', STR_PAD_LEFT));
+            $khmerName = $t->khmer_name ?? '';
+            $englishName = $t->english_name ?? '';
+            $resolvedDisplayName = PersonNameHelper::displayName(
+                $t->english_name,
+                $t->khmer_name,
+                $t->first_name,
+                $t->last_name,
+                $user->name ?: $code
+            );
             $deptId = $t->department_id;
             $deptName = $t->department?->name ?? '';
             $deptCode = $t->department?->code ?? '';
             $gender = $t->gender ?? '';
             $phone = $t->phone ?? '';
-            $dob = $t->date_of_birth ? (string) $t->date_of_birth : '';
+            $dob = $t->date_of_birth ? $t->date_of_birth->format('Y-m-d') : '';
             $position = $t->position ?? 'Lecturer';
-            $specialization = $t->specialization ?? '';
+            $workType = $t->work_type ?? 'Full-time';
+            $officeLocationId = $t->office_location_id;
+            $officeLocation = $t->office?->display_name ?? '';
+            $biography = $t->biography ?? '';
+            $specializations = $t->specializations;
+            $specialization = $specializations !== [] ? implode(', ', $specializations) : ($t->specialization ?? '');
         } elseif ($user->admin) {
             $a = $user->admin;
             $code = $a->admin_code ?? $a->admin_id ?? ('ADM' . str_pad((string) $a->id, 3, '0', STR_PAD_LEFT));
@@ -360,8 +397,8 @@ class AdminUserController extends Controller
 
         return [
             'id' => $user->id,
-            'name' => $user->name,
-            'email' => $user->email ?? $code,
+            'name' => $resolvedDisplayName ?? ($user->name ?: $code),
+            'email' => $user->email ?? '',
             'raw_email' => $user->email,
             'role' => $user->role,
             'status' => $user->status ?? 'active',
@@ -373,7 +410,8 @@ class AdminUserController extends Controller
             'teacher_code' => $code,
             'admin_code' => $code,
             'khmer_name' => $khmerName,
-            'english_name' => $englishName ?: $user->name,
+            'english_name' => $englishName,
+            'hire_date' => $user->teacher?->hire_date?->format('Y-m-d') ?? '',
             'gender' => $gender,
             'phone' => $phone,
             'date_of_birth' => $dob,
@@ -391,7 +429,13 @@ class AdminUserController extends Controller
             'academic_year_name' => $academicYearName,
             'class_name' => $user->student?->classRoom?->name ?? $user->student?->classRoom?->code ?? '',
             'position' => $position,
+            'work_type' => $workType,
+            'office_location_id' => $officeLocationId,
+            'office_location' => $officeLocation,
+            'bio' => $biography,
+            'biography' => $biography,
             'specialization' => $specialization,
+            'specializations' => $specializations,
             'family_information' => $familyInfo,
             'emergency_contact' => $emergencyContact,
             'attendance_summary' => $attendanceSummary,
@@ -401,6 +445,19 @@ class AdminUserController extends Controller
             'enrolled_courses_count' => count($enrolledCourses),
             'notes' => $studentNotes,
             'profile_picture' => $user->profile_picture_url,
+            'login_id' => $code,
+            'teacher_profile_status' => $user->teacher ? strtolower((string) ($user->teacher->status ?: 'active')) : null,
+            'login_account_status' => strtolower((string) ($user->status ?: 'active')),
+            'account_created' => true,
+            'account_linked' => $user->teacher
+                ? (strtolower((string) $user->role) === 'teacher' && ! empty($user->password))
+                : true,
+            'can_login' => $user->teacher
+                ? (strtolower((string) ($user->status ?: 'active')) === 'active'
+                    && strtolower((string) ($user->teacher->status ?: 'active')) === 'active'
+                    && strtolower((string) $user->role) === 'teacher'
+                    && ! empty($user->password))
+                : (strtolower((string) ($user->status ?: 'active')) === 'active'),
             'student' => $user->student,
             'teacher' => $user->teacher,
             'admin' => $user->admin,
@@ -409,14 +466,26 @@ class AdminUserController extends Controller
         ];
     }
 
-    public function store(Request $request, AcademicProfileResolver $resolver)
+    public function store(Request $request, AcademicProfileResolver $resolver, TeacherProfileService $profiles, TeacherAccountService $teacherAccounts)
     {
+        if ($request->exists('email') && trim((string) $request->input('email')) === '') {
+            $request->merge(['email' => null]);
+        }
+        if ($request->exists('date_of_birth') && trim((string) $request->input('date_of_birth')) === '') {
+            $request->merge(['date_of_birth' => null]);
+        }
+        if ($request->exists('hire_date') && trim((string) $request->input('hire_date')) === '') {
+            $request->merge(['hire_date' => null]);
+        }
+
         $role = strtolower($request->input('role', 'student'));
 
         $validated = $request->validate([
-            'name' => 'required|string|max:255',
+            'name' => 'nullable|string|max:255',
+            'khmer_name' => 'nullable|string|max:150',
+            'english_name' => 'nullable|string|max:150',
             'email' => ['nullable', 'email', 'max:255', Rule::unique('users', 'email')],
-            'password' => 'required|string|min:8|confirmed',
+            'password' => in_array($role, ['student', 'teacher', 'faculty'], true) ? 'nullable|string|max:100' : 'required|string|min:8|confirmed',
             'role' => 'required|string|in:student,teacher,admin,faculty',
             'status' => 'nullable|string|in:active,inactive,suspended,enrolled',
             'student_code' => 'nullable|string|max:50|unique:students,student_code',
@@ -429,59 +498,126 @@ class AdminUserController extends Controller
             'user_code' => 'nullable|string|max:50',
             'gender' => 'nullable|string|max:20',
             'phone' => 'nullable|string|max:30',
+            'date_of_birth' => 'nullable|date',
+            'hire_date' => 'nullable|date',
             'department_id' => 'nullable|integer|exists:departments,id',
             'department' => 'nullable|string|max:255',
+            'department_name' => 'nullable|string|max:255',
             'position' => 'nullable|string|max:255',
-            'specialization' => 'nullable|string|max:255',
+            'work_type' => 'nullable|string|max:50',
+            'office_location_id' => 'nullable|integer|exists:office_locations,id',
+            'office_location' => 'nullable|string|max:191',
+            'specialization' => 'nullable|string|max:1000',
+            'specializations' => 'nullable|array',
+            'specializations.*' => 'nullable|string|max:120',
+            'biography' => 'nullable|string|max:2000',
+            'bio' => 'nullable|string|max:2000',
         ]);
+
+        $khmerName = PersonNameHelper::clean($validated['khmer_name'] ?? null);
+        $englishName = PersonNameHelper::clean($validated['english_name'] ?? null);
+        $rawName = PersonNameHelper::clean($validated['name'] ?? null);
+        if ($khmerName === null && $englishName === null) {
+            if ($rawName === null) {
+                throw ValidationException::withMessages([
+                    'name' => ['At least one of Khmer Name or English Name is required.'],
+                ]);
+            }
+            if (in_array($role, ['student', 'teacher', 'faculty'], true)) {
+                if (preg_match('/\p{Khmer}/u', $rawName)) {
+                    $khmerName = $rawName;
+                } else {
+                    $englishName = $rawName;
+                }
+            }
+        }
+        $displayName = PersonNameHelper::displayName($englishName, $khmerName, $rawName, null, '');
 
         $status = $validated['status'] ?? 'active';
 
-        return DB::transaction(function () use ($validated, $role, $status, $resolver) {
+        if (in_array($role, ['teacher', 'faculty'], true)) {
+            $suppliedCode = trim((string) ($validated['teacher_code'] ?? $validated['teacher_id'] ?? $validated['code'] ?? $validated['user_code'] ?? ''));
+            if ($suppliedCode !== '') {
+                $teacherAccounts->assertUniqueLoginCode($suppliedCode, null, 'teacher_code');
+            }
+        }
+
+        return DB::transaction(function () use ($request, $validated, $role, $status, $resolver, $profiles, $teacherAccounts, $khmerName, $englishName, $displayName) {
+            if ($role === 'student') {
+                $rawPassword = (string) config('student_import.default_initial_password', 'STD@12345');
+            } elseif (in_array($role, ['teacher', 'faculty'], true)) {
+                $rawPassword = (string) config('slas.default_teacher_password', 'TCH@12345');
+            } else {
+                $rawPassword = $validated['password'];
+            }
+
             $user = User::create([
-                'name' => $validated['name'],
-                'email' => $validated['email'] ?? null,
-                'password' => Hash::make($validated['password']),
+                'name' => $displayName,
+                'email' => ! empty($validated['email']) ? strtolower(trim($validated['email'])) : null,
+                'password' => Hash::make($rawPassword),
                 'role' => $role === 'faculty' ? 'teacher' : $role,
                 'status' => $status,
             ]);
 
             $departmentId = $resolver->resolveDepartmentId(
                 $validated['department_id'] ?? null,
-                $validated['department'] ?? 'Computer Science'
+                $validated['department_name'] ?? $validated['department'] ?? 'Computer Science'
             );
 
-            $nameParts = explode(' ', trim($validated['name']), 2);
-            $firstName = $nameParts[0];
-            $lastName = $nameParts[1] ?? '';
+            [$firstName, $lastName] = PersonNameHelper::splitFirstLast($displayName);
 
             if ($role === 'student') {
                 $studentCode = $validated['student_code'] ?? $validated['student_id'] ?? $validated['code'] ?? $validated['user_code'] ?? ('STU' . str_pad((string) $user->id, 4, '0', STR_PAD_LEFT));
                 Student::create([
                     'user_id' => $user->id,
                     'student_code' => $studentCode,
-                    'english_name' => $validated['name'],
+                    'khmer_name' => $khmerName,
+                    'english_name' => $englishName,
                     'department_id' => $departmentId,
                     'first_name' => $firstName,
                     'last_name' => $lastName,
+                    'date_of_birth' => $validated['date_of_birth'] ?? null,
                     'gender' => $validated['gender'] ?? 'Male',
                     'phone' => $validated['phone'] ?? null,
                     'status' => $status === 'active' ? 'enrolled' : 'inactive',
                 ]);
             } elseif ($role === 'teacher' || $role === 'faculty') {
-                $teacherCode = $validated['teacher_code'] ?? $validated['teacher_id'] ?? $validated['code'] ?? $validated['user_code'] ?? ('TCH' . str_pad((string) $user->id, 5, '0', STR_PAD_LEFT));
-                Teacher::create([
+                $rawTeacherCode = trim((string) ($validated['teacher_code'] ?? $validated['teacher_id'] ?? $validated['code'] ?? $validated['user_code'] ?? ''));
+                $teacherCode = $rawTeacherCode !== ''
+                    ? $teacherAccounts->normalizeCode($rawTeacherCode)
+                    : ('TCH' . str_pad((string) $user->id, 5, '0', STR_PAD_LEFT));
+                $officeId = $profiles->resolveOfficeLocationId(
+                    $validated['office_location_id'] ?? null,
+                    $validated['office_location'] ?? null,
+                    $request->user()?->id
+                );
+                $teacher = Teacher::create([
                     'user_id' => $user->id,
                     'teacher_code' => $teacherCode,
+                    'khmer_name' => $khmerName,
+                    'english_name' => $englishName,
                     'department_id' => $departmentId,
                     'first_name' => $firstName,
                     'last_name' => $lastName,
+                    'date_of_birth' => $validated['date_of_birth'] ?? null,
+                    'hire_date' => $validated['hire_date'] ?? null,
                     'gender' => $validated['gender'] ?? 'Male',
                     'phone' => $validated['phone'] ?? null,
+                    'office_location_id' => $officeId,
                     'position' => $validated['position'] ?? 'Lecturer',
-                    'specialization' => $validated['specialization'] ?? null,
+                    'work_type' => $validated['work_type'] ?? 'Full-time',
+                    'specialization' => null,
+                    'biography' => $profiles->cleanBiography($validated['biography'] ?? $validated['bio'] ?? null),
                     'status' => $status,
                 ]);
+                if (array_key_exists('specializations', $validated) || array_key_exists('specialization', $validated)) {
+                    $profiles->syncSpecializations(
+                        $teacher,
+                        $validated['specializations'] ?? null,
+                        $validated['specialization'] ?? null,
+                        $request->user()?->id
+                    );
+                }
             } elseif ($role === 'admin') {
                 $adminCode = $validated['admin_code'] ?? $validated['admin_id'] ?? $validated['code'] ?? $validated['user_code'] ?? ('ADM' . str_pad((string) $user->id, 5, '0', STR_PAD_LEFT));
                 Admin::create([
@@ -498,16 +634,22 @@ class AdminUserController extends Controller
 
             return response()->json([
                 'message' => 'User created successfully.',
-                'data' => $this->formatUserPayload($user->fresh(['student.department', 'teacher.department', 'admin']), true),
+                'data' => $this->formatUserPayload($user->fresh(['student.department', 'teacher.department', 'teacher.office', 'teacher.specializationItems', 'admin']), true),
             ], 201);
         });
     }
 
-    public function update(Request $request, string|int $user, AcademicProfileResolver $resolver)
+    public function update(Request $request, string|int $user, AcademicProfileResolver $resolver, TeacherProfileService $profiles, TeacherAccountService $teacherAccounts)
     {
         $user = $this->resolveUser($user);
-        if ($request->filled('email') && !filter_var($request->input('email'), FILTER_VALIDATE_EMAIL)) {
+        if ($request->exists('email') && trim((string) $request->input('email')) === '') {
             $request->merge(['email' => null]);
+        }
+        if ($request->exists('date_of_birth') && trim((string) $request->input('date_of_birth')) === '') {
+            $request->merge(['date_of_birth' => null]);
+        }
+        if ($request->exists('hire_date') && trim((string) $request->input('hire_date')) === '') {
+            $request->merge(['hire_date' => null]);
         }
 
         $validated = $request->validate([
@@ -526,12 +668,14 @@ class AdminUserController extends Controller
             'admin_code' => 'nullable|string|max:50',
             'gender' => 'nullable|string|max:20',
             'phone' => 'nullable|string|max:30',
-            'date_of_birth' => 'nullable|string|max:30',
+            'date_of_birth' => 'nullable|date',
+            'hire_date' => 'nullable|date',
             'place_of_birth' => 'nullable|string|max:190',
             'current_address' => 'nullable|string|max:255',
             'address' => 'nullable|string|max:255',
             'department_id' => 'nullable|integer|exists:departments,id',
             'department' => 'nullable|string|max:255',
+            'department_name' => 'nullable|string|max:255',
             'program_id' => 'nullable|integer|exists:programs,id',
             'program' => 'nullable|string|max:255',
             'major' => 'nullable|string|max:255',
@@ -540,7 +684,14 @@ class AdminUserController extends Controller
             'academic_year' => 'nullable|string|max:50',
             'semester_id' => 'nullable|integer|exists:semesters,id',
             'position' => 'nullable|string|max:255',
-            'specialization' => 'nullable|string|max:255',
+            'work_type' => 'nullable|string|max:50',
+            'office_location_id' => 'nullable|integer|exists:office_locations,id',
+            'office_location' => 'nullable|string|max:191',
+            'specialization' => 'nullable|string|max:1000',
+            'specializations' => 'nullable|array',
+            'specializations.*' => 'nullable|string|max:120',
+            'biography' => 'nullable|string|max:2000',
+            'bio' => 'nullable|string|max:2000',
             'father_khmer_name' => 'nullable|string|max:150',
             'father_english_name' => 'nullable|string|max:150',
             'father_phone' => 'nullable|string|max:30',
@@ -553,16 +704,64 @@ class AdminUserController extends Controller
             'emergency_contact_address' => 'nullable|string|max:255',
         ]);
 
-        DB::transaction(function () use ($validated, $user, $resolver) {
-            $displayName = $validated['english_name'] ?? $validated['name'] ?? null;
+        if ($user->teacher && $request->filled('teacher_code')) {
+            $teacherAccounts->assertUniqueLoginCode((string) $request->input('teacher_code'), $user->teacher->id, 'teacher_code');
+        }
+
+        $resolvedProfileNames = null;
+        if ($user->student || $user->teacher) {
+            $profileModel = $user->student ?? $user->teacher;
+            $nextKhmer = array_key_exists('khmer_name', $validated)
+                ? PersonNameHelper::clean($validated['khmer_name'])
+                : $profileModel->khmer_name;
+            $nextEnglish = array_key_exists('english_name', $validated)
+                ? PersonNameHelper::clean($validated['english_name'])
+                : $profileModel->english_name;
+
+            $explicitNameUpdate = array_key_exists('khmer_name', $validated) || array_key_exists('english_name', $validated);
+            if (! $explicitNameUpdate && array_key_exists('name', $validated)) {
+                $cleanedName = PersonNameHelper::clean($validated['name']);
+                if ($cleanedName === null) {
+                    throw ValidationException::withMessages(['name' => ['At least one of Khmer Name or English Name is required.']]);
+                }
+                if ($nextEnglish !== null || $nextKhmer === null) {
+                    $nextEnglish = $cleanedName;
+                } else {
+                    $nextKhmer = $cleanedName;
+                }
+            }
+
+            $nextDisplay = PersonNameHelper::displayName(
+                $nextEnglish,
+                $nextKhmer,
+                ($explicitNameUpdate || array_key_exists('name', $validated)) ? null : $profileModel->first_name,
+                ($explicitNameUpdate || array_key_exists('name', $validated)) ? null : $profileModel->last_name,
+                ''
+            );
+
+            if ($nextDisplay === '') {
+                throw ValidationException::withMessages([
+                    'english_name' => ['At least one of Khmer Name or English Name is required.'],
+                ]);
+            }
+
+            $resolvedProfileNames = [
+                'khmer' => $nextKhmer,
+                'english' => $nextEnglish,
+                'display' => $nextDisplay,
+            ];
+        }
+
+        DB::transaction(function () use ($request, $validated, $user, $resolver, $profiles, $teacherAccounts, $resolvedProfileNames) {
+            $displayName = $resolvedProfileNames['display'] ?? ($validated['english_name'] ?? $validated['name'] ?? null);
             if (!$displayName && (!empty($validated['first_name']) || !empty($validated['last_name']))) {
                 $displayName = trim(($validated['first_name'] ?? '') . ' ' . ($validated['last_name'] ?? ''));
             }
             if ($displayName) {
                 $user->name = $displayName;
             }
-            if (array_key_exists('email', $validated) && $validated['email'] !== null) {
-                $user->email = $validated['email'];
+            if (array_key_exists('email', $validated)) {
+                $user->email = ! empty($validated['email']) ? strtolower(trim((string) $validated['email'])) : null;
             }
             if (!empty($validated['password'])) {
                 $user->password = Hash::make($validated['password']);
@@ -634,16 +833,20 @@ class AdminUserController extends Controller
                 }
 
                 $newCode = $validated['student_identifier'] ?? $validated['student_code'] ?? $s->student_code;
+                [$splitFirst, $splitLast] = PersonNameHelper::splitFirstLast($resolvedProfileNames['display']);
+                $nextDob = array_key_exists('date_of_birth', $validated)
+                    ? ($validated['date_of_birth'] !== null ? Carbon::parse((string) $validated['date_of_birth'])->toDateString() : null)
+                    : $s->date_of_birth;
 
                 $s->update([
                     'student_code' => $newCode,
-                    'khmer_name' => $validated['khmer_name'] ?? $s->khmer_name,
-                    'english_name' => $validated['english_name'] ?? $displayName ?? $s->english_name,
-                    'first_name' => $firstName,
-                    'last_name' => $lastName,
+                    'khmer_name' => $resolvedProfileNames['khmer'],
+                    'english_name' => $resolvedProfileNames['english'],
+                    'first_name' => $splitFirst,
+                    'last_name' => $splitLast,
                     'gender' => $validated['gender'] ?? $s->gender,
                     'phone' => array_key_exists('phone', $validated) ? $validated['phone'] : $s->phone,
-                    'date_of_birth' => !empty($validated['date_of_birth']) ? $validated['date_of_birth'] : $s->date_of_birth,
+                    'date_of_birth' => $nextDob,
                     'place_of_birth' => array_key_exists('place_of_birth', $validated) ? $validated['place_of_birth'] : $s->place_of_birth,
                     'address' => $validated['current_address'] ?? $validated['address'] ?? $s->address,
                     'department_id' => $deptId,
@@ -703,20 +906,59 @@ class AdminUserController extends Controller
                 $t = $user->teacher;
                 $deptId = $resolver->resolveDepartmentId(
                     $validated['department_id'] ?? null,
-                    $validated['department'] ?? null
+                    $validated['department_name'] ?? $validated['department'] ?? null
                 ) ?? $t->department_id;
 
+                $officeId = $t->office_location_id;
+                if (array_key_exists('office_location_id', $validated) || array_key_exists('office_location', $validated)) {
+                    $officeId = $profiles->resolveOfficeLocationId(
+                        $validated['office_location_id'] ?? null,
+                        $validated['office_location'] ?? null,
+                        $request->user()?->id
+                    );
+                }
+
+                $biography = $t->biography;
+                if (array_key_exists('biography', $validated) || array_key_exists('bio', $validated)) {
+                    $biography = $profiles->cleanBiography($validated['biography'] ?? $validated['bio'] ?? null);
+                }
+
+                [$splitTFirst, $splitTLast] = PersonNameHelper::splitFirstLast($resolvedProfileNames['display']);
+                $nextTDob = array_key_exists('date_of_birth', $validated)
+                    ? ($validated['date_of_birth'] !== null ? Carbon::parse((string) $validated['date_of_birth'])->toDateString() : null)
+                    : $t->date_of_birth;
+                $nextTHire = array_key_exists('hire_date', $validated)
+                    ? ($validated['hire_date'] !== null ? Carbon::parse((string) $validated['hire_date'])->toDateString() : null)
+                    : $t->hire_date;
+
                 $t->update([
-                    'teacher_code' => $validated['teacher_code'] ?? $t->teacher_code,
-                    'first_name' => $firstName,
-                    'last_name' => $lastName,
+                    'teacher_code' => isset($validated['teacher_code']) && trim($validated['teacher_code']) !== ''
+                        ? $teacherAccounts->normalizeCode($validated['teacher_code'])
+                        : $t->teacher_code,
+                    'khmer_name' => $resolvedProfileNames['khmer'],
+                    'english_name' => $resolvedProfileNames['english'],
+                    'first_name' => $splitTFirst,
+                    'last_name' => $splitTLast,
                     'department_id' => $deptId,
+                    'date_of_birth' => $nextTDob,
+                    'hire_date' => $nextTHire,
                     'gender' => $validated['gender'] ?? $t->gender,
                     'phone' => array_key_exists('phone', $validated) ? $validated['phone'] : $t->phone,
+                    'office_location_id' => $officeId,
                     'position' => $validated['position'] ?? $t->position,
-                    'specialization' => $validated['specialization'] ?? $t->specialization,
+                    'work_type' => $validated['work_type'] ?? $t->work_type,
+                    'biography' => $biography,
                     'status' => $user->status,
                 ]);
+
+                if (array_key_exists('specializations', $validated) || array_key_exists('specialization', $validated)) {
+                    $profiles->syncSpecializations(
+                        $t,
+                        $validated['specializations'] ?? null,
+                        $validated['specialization'] ?? null,
+                        $request->user()?->id
+                    );
+                }
             }
 
             if ($user->admin) {
@@ -731,6 +973,10 @@ class AdminUserController extends Controller
                     'status' => $user->status,
                 ]);
             }
+
+            if ($user->status !== 'active') {
+                $user->tokens()->delete();
+            }
         });
 
         $user->load([
@@ -742,6 +988,8 @@ class AdminUserController extends Controller
             'student.courses.teacher.user',
             'student.gpaRecords.semester',
             'teacher.department',
+            'teacher.office',
+            'teacher.specializationItems',
             'teacher.courses',
             'teacher.classes',
             'admin',
@@ -772,6 +1020,9 @@ class AdminUserController extends Controller
         }
         if ($user->admin) {
             $user->admin->update(['status' => $user->status]);
+        }
+        if ($user->status !== 'active') {
+            $user->tokens()->delete();
         }
 
         return response()->json([

@@ -82,6 +82,13 @@ class StudentImportController extends Controller
         StudentImportJob::dispatchSync($import->id);
 
         $fresh = $import->fresh()->load('user:id,name')->toApi();
+        if (($fresh['status'] ?? null) === StudentImport::FAILED) {
+            return response()->json([
+                'message' => $fresh['failure_message'] ?? 'Student import failed. No records were saved.',
+                'data' => $fresh,
+            ], 500);
+        }
+
         $message = $fresh['has_generated_credentials']
             ? 'Import processed. Generated temporary passwords are available once from the credentials endpoint.'
             : 'Import processed. Progress is available from the status endpoint.';

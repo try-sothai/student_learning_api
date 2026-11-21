@@ -6,6 +6,7 @@ use App\Exceptions\DuplicateStudentException;
 use App\Models\Student;
 use App\Models\StudentImportRow;
 use App\Services\StudentExportService;
+use App\Services\StudentImportReportService;
 use App\Services\StudentImportService;
 use App\Services\StudentImportValidationService;
 use Illuminate\Http\JsonResponse;
@@ -33,15 +34,23 @@ class StudentAdminController extends Controller
 
     public function store(Request $request, StudentImportService $service, StudentImportValidationService $validator): JsonResponse
     {
+        if ($request->exists('email') && trim((string) $request->input('email')) === '') {
+            $request->merge(['email' => null]);
+        }
+        if ($request->exists('date_of_birth') && trim((string) $request->input('date_of_birth')) === '') {
+            $request->merge(['date_of_birth' => null]);
+        }
+
         $in = $request->validate([
-            'khmer_name' => 'required|string|max:150',
-            'english_name' => 'required|string|max:150',
+            'khmer_name' => 'nullable|string|max:150',
+            'english_name' => 'nullable|string|max:150',
+            'email' => ['nullable', 'email', 'max:255', \Illuminate\Validation\Rule::unique('users', 'email')],
             'gender' => 'required|string',
-            'date_of_birth' => 'required|string',
+            'date_of_birth' => 'nullable|string',
             'place_of_birth' => 'nullable|string|max:190',
             'current_address' => 'nullable|string|max:255',
             'student_identifier' => 'required|string|max:50',
-            'password' => 'nullable|string|min:8|max:100',
+            'password' => 'nullable|string|max:100',
             'department_id' => 'required|integer|exists:departments,id',
             'program_id' => 'required|integer|exists:programs,id',
             'year_level' => 'required|integer|min:1',
@@ -59,6 +68,14 @@ class StudentAdminController extends Controller
             'emergency_contact_address' => 'nullable|string|max:255',
         ]);
 
+        if (\App\Support\PersonNameHelper::clean($in['khmer_name'] ?? null) === null
+            && \App\Support\PersonNameHelper::clean($in['english_name'] ?? null) === null) {
+            return response()->json([
+                'message' => 'Validation failed.',
+                'errors' => ['khmer_name' => ['At least one of Khmer Name or English Name is required.']],
+            ], 422);
+        }
+
         // Reuse the import rules by translating ids into the template's codes.
         $in['department_code'] = DB::table('departments')->where('id', $in['department_id'])->value('code');
         $in['program_code'] = DB::table('programs')->where('id', $in['program_id'])->value('code');
@@ -73,7 +90,7 @@ class StudentAdminController extends Controller
         }
 
         try {
-            $created = $service->registerStudent($result['data'], $row['password'] ?: null);
+            $created = $service->registerStudent($result['data']);
         } catch (DuplicateStudentException $e) {
             return response()->json([
                 'message' => 'Validation failed.',
@@ -86,46 +103,81 @@ class StudentAdminController extends Controller
             'data' => [
                 'id' => $created['student']->id,
                 'student_identifier' => $created['student']->student_code,
-                // returned once, only when the system generated it
+                'username' => $created['student']->student_code,
+                'role' => 'student',
+                'initial_password' => $created['temp_password'],
                 'temporary_password' => $created['temp_password'],
             ],
         ], 201);
     }
 
     /** Admin-approved password reset when an imported student's password is missing or unknown. */
-    public function resetPassword(Request $request, Student $student): JsonResponse
+    public function resetPassword(Request $request, string $student)
     {
+        $record = ctype_digit($student)
+            ? Student::find((int) $student)
+            : Student::whereRaw('LOWER(student_code) = ?', [mb_strtolower(trim($student))])->first();
+
+        if (! $record) {
+            return response()->json(['message' => 'Student record not found.'], 404);
+        }
+
         $validated = $request->validate([
             'password' => 'nullable|string|min:8|max:100',
+            'format' => 'nullable|in:json,csv',
         ]);
 
-        $user = $student->user;
+        $user = $record->user;
         if (! $user) {
             return response()->json(['message' => 'No user account is linked to this student.'], 422);
         }
 
         $supplied = isset($validated['password']) && $validated['password'] !== '' ? $validated['password'] : null;
         $generated = $supplied === null;
-        $plain = $generated ? Str::password(10, true, true, false) : $supplied;
+        $plain = $generated ? (string) config('student_import.default_initial_password', 'STD@12345') : $supplied;
 
-        DB::transaction(function () use ($user, $student, $plain) {
+        DB::transaction(function () use ($user, $record, $plain) {
             $user->forceFill(['password' => Hash::make($plain)])->save();
             $user->tokens()->delete();
-            StudentImportRow::where('student_id', $student->id)->update(['temp_password_encrypted' => null]);
+            StudentImportRow::where('student_id', $record->id)->update(['temp_password_encrypted' => null]);
         });
 
         Log::info('Admin reset student password', [
             'admin_id' => $request->user()->id,
-            'student_id' => $student->id,
-            'student_code' => $student->student_code,
+            'student_id' => $record->id,
+            'student_code' => $record->student_code,
             'generated' => $generated,
         ]);
+
+        if (($validated['format'] ?? 'json') === 'csv') {
+            $filename = 'student_credentials_' . preg_replace('/[^A-Za-z0-9_-]/', '_', (string) $record->student_code) . '.csv';
+
+            return response()->streamDownload(function () use ($record, $user, $plain, $generated) {
+                $out = fopen('php://output', 'w');
+                fwrite($out, "\xEF\xBB\xBF");
+                fputcsv($out, ['student_id', 'username', 'english_name', 'role', 'new_initial_password']);
+                fputcsv($out, [
+                    StudentImportReportService::safe($record->student_code),
+                    StudentImportReportService::safe($record->student_code),
+                    StudentImportReportService::safe($record->english_name),
+                    $user->role,
+                    $generated ? StudentImportReportService::safe($plain) : '[custom password set by admin]',
+                ]);
+                fclose($out);
+            }, $filename, [
+                'Content-Type' => 'text/csv; charset=UTF-8',
+            ]);
+        }
 
         return response()->json([
             'message' => 'Student password has been reset successfully.',
             'data' => [
-                'student_id' => $student->id,
-                'student_identifier' => $student->student_code,
+                'student_id' => $record->id,
+                'student_identifier' => $record->student_code,
+                'student_code' => $record->student_code,
+                'username' => $record->student_code,
+                'role' => $user->role,
+                'password_generated' => $generated,
                 'temporary_password' => $generated ? $plain : null,
             ],
         ]);

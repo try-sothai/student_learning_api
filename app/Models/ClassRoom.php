@@ -19,9 +19,18 @@ class ClassRoom extends Model
     protected $fillable = [
         'department_id',
         'academic_year_id',
+        'building_id',
+        'floor_id',
+        'course_id',
+        'teacher_id',
         'name',
         'code',
         'year_level',
+        'day_of_week',
+        'start_time',
+        'end_time',
+        'room',
+        'capacity',
         'status',
     ];
 
@@ -29,7 +38,23 @@ class ClassRoom extends Model
     {
         return [
             'year_level' => 'integer',
+            'capacity' => 'integer',
         ];
+    }
+
+    public function building(): BelongsTo
+    {
+        return $this->belongsTo(Building::class);
+    }
+
+    public function floor(): BelongsTo
+    {
+        return $this->belongsTo(Floor::class);
+    }
+
+    public function schedules(): HasMany
+    {
+        return $this->hasMany(ClassSchedule::class, 'class_id');
     }
 
     public function department(): BelongsTo
@@ -42,8 +67,23 @@ class ClassRoom extends Model
         return $this->belongsTo(AcademicYear::class);
     }
 
+    public function course(): BelongsTo
+    {
+        return $this->belongsTo(Course::class);
+    }
+
+    public function teacher(): BelongsTo
+    {
+        return $this->belongsTo(Teacher::class);
+    }
+
     public function students(): HasMany
     {
         return $this->hasMany(Student::class, 'class_id');
+    }
+
+    public function offerings(): HasMany
+    {
+        return $this->hasMany(CourseOffering::class, 'class_id');
     }
 }

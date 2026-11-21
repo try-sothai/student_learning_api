@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\PersonNameHelper;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -69,9 +70,20 @@ class Student extends Model
     protected function casts(): array
     {
         return [
-            'date_of_birth' => 'date',
-            'enrollment_date' => 'date',
+            'date_of_birth' => 'date:Y-m-d',
+            'enrollment_date' => 'date:Y-m-d',
         ];
+    }
+
+    public function resolveDisplayName(): string
+    {
+        return PersonNameHelper::displayName(
+            $this->english_name,
+            $this->khmer_name,
+            $this->first_name,
+            $this->last_name,
+            (string) ($this->student_code ?? '')
+        );
     }
 
     protected function studentId(): Attribute

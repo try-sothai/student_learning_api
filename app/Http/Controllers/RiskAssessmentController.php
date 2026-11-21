@@ -70,8 +70,15 @@ class RiskAssessmentController extends Controller
         ], 201);
     }
 
-    public function show(RiskAssessment $riskAssessment)
+    public function show(Request $request, RiskAssessment $riskAssessment)
     {
+        $apiUser = auth('sanctum')->user() ?? $request->user();
+        if ($apiUser && $apiUser->role === 'student') {
+            if (! $apiUser->student || (int) $riskAssessment->student_id !== (int) $apiUser->student->id) {
+                return response()->json(['message' => 'Unauthorized access.'], 403);
+            }
+        }
+
         return response()->json([
             'message' => 'Risk assessment retrieved successfully.',
             'data' => $riskAssessment->load(['student.user', 'course', 'semester']),

@@ -101,28 +101,20 @@ class AuthController extends Controller
         |--------------------------------------------------------------------------
         */
 
-        if (!$user) {
+        if (!$user || !Hash::check($request->password, $user->password)) {
 
             return back()
                 ->withInput($request->only('login_id'))
                 ->withErrors([
-                    'login_id' => 'Invalid Student / Teacher / Admin ID.',
+                    'login_id' => 'Invalid Student / Teacher / Admin ID or password.',
                 ]);
         }
 
-
-        /*
-        |--------------------------------------------------------------------------
-        | Check Password
-        |--------------------------------------------------------------------------
-        */
-
-        if (!Hash::check($request->password, $user->password)) {
-
+        if ($this->isAccountInactive($user)) {
             return back()
                 ->withInput($request->only('login_id'))
                 ->withErrors([
-                    'login_id' => 'Invalid ID or password.',
+                    'login_id' => 'Account is inactive or deactivated. Please contact an administrator.',
                 ]);
         }
 
@@ -221,102 +213,46 @@ class AuthController extends Controller
             ], 401);
         }
 
+        if ($this->isAccountInactive($user)) {
+            RateLimiter::clear($throttleKey);
+            return response()->json([
+                'message' => 'Account is inactive or deactivated. Please contact an administrator.',
+            ], 403);
+        }
+
         RateLimiter::clear($throttleKey);
 
         $token = $user->createToken('api-token')->plainTextToken;
 
         $user->load(['student', 'teacher', 'admin']);
 
-        $studentId = null;
-        if ($user->student) {
-            $studentId = $user->student->student_code;
-            $user->student_id = $studentId;
-        } elseif ($user->teacher) {
-            $studentId = $user->teacher->teacher_code;
-            $user->teacher_id = $studentId;
-        } elseif ($user->admin) {
-            $studentId = $user->admin->admin_code;
-            $user->admin_id = $studentId;
+        $resolvedLoginId = null;
+        if ($user->role === 'student' && $user->student) {
+            $resolvedLoginId = $user->student->student_code;
+            $user->student_id = $resolvedLoginId;
+        } elseif ($user->role === 'teacher' && $user->teacher) {
+            $resolvedLoginId = $user->teacher->teacher_code;
+            $user->teacher_id = $resolvedLoginId;
+        } elseif ($user->role === 'admin' && $user->admin) {
+            $resolvedLoginId = $user->admin->admin_code;
+            $user->admin_id = $resolvedLoginId;
         }
 
         return response()->json([
             'message' => 'Login successful.',
             'user' => $user,
-            'student_id' => $studentId ?? $request->login_id,
+            'role' => $user->role,
+            'login_id' => $resolvedLoginId ?? $loginId,
+            'student_id' => $resolvedLoginId ?? $request->login_id,
             'token' => $token,
         ], 200);
     }
 
     public function register(Request $request, AcademicProfileResolver $resolver)
     {
-        // The request key stays `student_id` (Android contract); it is stored in students.student_code.
-        $validated = $request->validate([
-            'student_id' => 'required|string|max:50|unique:students,student_code',
-            'first_name' => 'required|string|max:100',
-            'last_name' => 'required|string|max:100',
-            'email' => 'required|email|max:255|unique:users,email',
-            'password' => 'required|string|min:8|confirmed',
-            'date_of_birth' => 'nullable|date',
-            'gender' => 'required|string|max:20',
-            'nationality' => 'nullable|string|max:100',
-            'phone' => 'nullable|string|max:30',
-            'address' => 'nullable|string|max:255',
-            'department_id' => 'nullable|integer|exists:departments,id',
-            'class_id' => 'nullable|integer|exists:classes,id',
-            // Accepted for backward compatibility: department name/code and academic year label.
-            'department' => 'nullable|string|max:255',
-            'major' => 'nullable|string|max:255',
-            'academic_year' => 'nullable|string|max:20',
-            'year_level' => 'nullable|integer|min:1|max:10',
-            // Semester is no longer stored on the student (see semesters / course_enrollments).
-            'semester' => 'nullable|string|max:50',
-            'advisor' => 'nullable|string|max:255',
-            'enrollment_date' => 'nullable|date',
-            'status' => 'nullable|string|max:50',
-        ]);
-
-        $departmentId = $resolver->resolveDepartmentId(
-            $validated['department_id'] ?? null,
-            $validated['department'] ?? null,
-        );
-
-        $classId = $validated['class_id']
-            ?? $resolver->findClassId($departmentId, $validated['academic_year'] ?? null, $validated['year_level'] ?? null);
-
-        $user = User::create([
-            'name' => trim($validated['first_name'] . ' ' . $validated['last_name']),
-            'email' => $validated['email'],
-            'password' => Hash::make($validated['password']),
-            'role' => 'student',
-        ]);
-
-        $student = Student::create([
-            'user_id' => $user->id,
-            'student_code' => $validated['student_id'],
-            'department_id' => $departmentId,
-            'class_id' => $classId,
-            'first_name' => $validated['first_name'],
-            'last_name' => $validated['last_name'],
-            'date_of_birth' => $validated['date_of_birth'] ?? now()->toDateString(),
-            'gender' => $validated['gender'],
-            'nationality' => $validated['nationality'] ?? 'Cambodian',
-            'phone' => $validated['phone'] ?? null,
-            'address' => $validated['address'] ?? null,
-            'major' => $validated['major'] ?? null,
-            'year_level' => $validated['year_level'] ?? null,
-            'advisor' => $validated['advisor'] ?? null,
-            'enrollment_date' => $validated['enrollment_date'] ?? now()->toDateString(),
-            'status' => $validated['status'] ?? 'enrolled',
-        ]);
-
-        $token = $user->createToken('api-token')->plainTextToken;
-
         return response()->json([
-            'message' => 'Registration successful.',
-            'user' => $user,
-            'student' => $student->load(['department', 'classRoom']),
-            'token' => $token,
-        ], 201);
+            'message' => 'Public student registration is disabled. Student accounts must be created by an administrator.',
+        ], 403);
     }
 
     public function profile(Request $request)
@@ -495,25 +431,59 @@ class AuthController extends Controller
 
     protected function findUserByLoginId(string $loginId): ?User
     {
-        $student = Student::where('student_code', $loginId)->with('user')->first();
+        $normalized = strtoupper(trim($loginId));
+        if ($normalized === '') {
+            return null;
+        }
 
-        if ($student && $student->user) {
+        $student = Student::whereRaw('UPPER(student_code) = ?', [$normalized])->with('user')->first();
+        if ($student && $student->user && strtolower((string) $student->user->role) === 'student') {
+            $student->user->setRelation('student', $student);
             return $student->user;
         }
 
-        $teacher = Teacher::where('teacher_code', $loginId)->with('user')->first();
-
-        if ($teacher && $teacher->user) {
+        $teacher = Teacher::whereRaw('UPPER(teacher_code) = ?', [$normalized])->with('user')->first();
+        if ($teacher && $teacher->user && strtolower((string) $teacher->user->role) === 'teacher') {
+            $teacher->user->setRelation('teacher', $teacher);
             return $teacher->user;
         }
 
-        $admin = Admin::where('admin_code', $loginId)->with('user')->first();
-
-        if ($admin && $admin->user) {
+        $admin = Admin::whereRaw('UPPER(admin_code) = ?', [$normalized])->with('user')->first();
+        if ($admin && $admin->user && strtolower((string) $admin->user->role) === 'admin') {
+            $admin->user->setRelation('admin', $admin);
             return $admin->user;
         }
 
         return null;
+    }
+
+    protected function isAccountInactive(User $user): bool
+    {
+        $userStatus = strtolower((string) ($user->status ?? 'active'));
+        if ($userStatus !== 'active') {
+            return true;
+        }
+
+        $role = strtolower((string) $user->role);
+        if ($role === 'teacher') {
+            $teacher = $user->teacher;
+            if (! $teacher || strtolower((string) ($teacher->status ?? 'inactive')) !== 'active') {
+                return true;
+            }
+        } elseif ($role === 'student') {
+            $student = $user->student;
+            $sStatus = strtolower((string) ($student?->status ?? 'inactive'));
+            if (! $student || in_array($sStatus, ['inactive', 'suspended', 'graduated', 'dropped'], true)) {
+                return true;
+            }
+        } elseif ($role === 'admin') {
+            $admin = $user->admin;
+            if ($admin && strtolower((string) ($admin->status ?? 'active')) !== 'active') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     protected function getRoleProfile(User $user)
