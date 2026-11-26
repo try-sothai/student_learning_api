@@ -13,21 +13,36 @@ class AssignmentSubmission extends Model
     protected $fillable = [
         'assignment_id',
         'student_id',
+        'version_number',
         'submitted_at',
+        'is_late',
         'score',
         'feedback',
         'status',
+        'is_latest',
+        'override_id',
         'file_path',
         'original_file_name',
         'mime_type',
         'file_size',
+        'submission_text',
+    ];
+
+    protected $attributes = [
+        'version_number' => 1,
+        'is_late' => false,
+        'is_latest' => true,
     ];
 
     protected function casts(): array
     {
         return [
+            'version_number' => 'integer',
             'submitted_at' => 'datetime',
+            'is_late' => 'boolean',
             'score' => 'float',
+            'is_latest' => 'boolean',
+            'override_id' => 'integer',
             'file_size' => 'integer',
         ];
     }
@@ -40,5 +55,10 @@ class AssignmentSubmission extends Model
     public function student(): BelongsTo
     {
         return $this->belongsTo(Student::class);
+    }
+
+    public function override(): BelongsTo
+    {
+        return $this->belongsTo(AssessmentStudentOverride::class, 'override_id');
     }
 }

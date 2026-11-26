@@ -25,7 +25,7 @@
             <tbody>
                 @forelse($attempts as $attempt)
                     <tr>
-                        <td class="ps-4"><strong>{{ $attempt->student?->user?->name ?? trim(($attempt->student?->first_name ?? '') . ' ' . ($attempt->student?->last_name ?? '')) }}</strong><small class="d-block text-muted">{{ $attempt->student?->student_id }}</small></td>
+                        <td class="ps-4"><strong>{{ $attempt->student?->user?->name ?? trim(($attempt->student?->first_name ?? '') . ' ' . ($attempt->student?->last_name ?? '')) }}</strong><small class="d-block text-muted">{{ $attempt->student?->student_id }} @if($attempt->student?->year_level_code)<span class="badge bg-primary-subtle text-primary ms-1">{{ $attempt->student->year_level_code }}</span>@endif</small></td>
                         <td><a href="{{ route('teacher.assignments.show', $attempt->assignment) }}" class="text-decoration-none fw-semibold">{{ $attempt->assignment?->title }}</a><small class="d-block text-muted">{{ $attempt->assignment?->assignment_type === 'true_false' ? 'Quiz' : 'Assignment' }} · Attempt {{ $attempt->attempt_number }}</small></td>
                         <td>{{ $attempt->assignment?->course?->code }}</td>
                         <td>{{ $attempt->submitted_at?->format('M d, Y H:i') }}</td>

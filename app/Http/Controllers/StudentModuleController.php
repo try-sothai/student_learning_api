@@ -16,17 +16,22 @@ use App\Models\RiskAssessment;
 use App\Models\Semester;
 use App\Models\Exam;
 use App\Models\Attendance;
+use App\Services\QuizGradingService;
+use App\Services\StudentAnalyticsCalculator;
 use App\Services\StudentAuthorizationService;
+use App\Support\YearLevel;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class StudentModuleController extends Controller
 {
     protected StudentAuthorizationService $authService;
+    protected StudentAnalyticsCalculator $calculator;
 
-    public function __construct(StudentAuthorizationService $authService)
+    public function __construct(StudentAuthorizationService $authService, StudentAnalyticsCalculator $calculator)
     {
         $this->authService = $authService;
+        $this->calculator = $calculator;
     }
 
     public function dashboard(Request $request)
@@ -43,7 +48,19 @@ class StudentModuleController extends Controller
         $presentSessions = $overallAttendanceDetails->where('status', 'present')->count();
         $overallAttendanceRate = $totalSessions > 0 ? round(($presentSessions / $totalSessions) * 100, 2) : null;
 
-        $gpaRecord = GpaRecord::where('student_id', $student->id)->orderByDesc('semester_id')->first();
+        $gpaRecords = GpaRecord::where('student_id', $student->id)->orderBy('semester_id')->get();
+        $weightedPoints = 0.0;
+        $weightedCredits = 0.0;
+        foreach ($gpaRecords as $gr) {
+            $cr = (float) ($gr->earned_credits ?: 0.0);
+            if ($cr > 0) {
+                $weightedPoints += ((float) $gr->gpa) * $cr;
+                $weightedCredits += $cr;
+            }
+        }
+        $cumulativeGpa = $weightedCredits > 0
+            ? round($weightedPoints / $weightedCredits, 2)
+            : ($gpaRecords->isNotEmpty() ? round((float) $gpaRecords->avg('gpa'), 2) : null);
 
         // Get current period from the latest active enrollment
         $latestEnrollment = CourseEnrollment::where('student_id', $student->id)
@@ -52,24 +69,52 @@ class StudentModuleController extends Controller
             ->orderByDesc('semester_id')
             ->first();
 
+        $student->load(['user', 'program', 'department', 'classRoom.academicYear']);
+        $gpaCalc = app(\App\Services\GpaCalculationService::class);
+        $currentPeriodInfo = $gpaCalc->resolveCurrentPeriod($student);
+        $resolvedPeriodYear = $currentPeriodInfo['study_year'];
+        $liveSemSummary = $currentPeriodInfo['semester_id']
+            ? $gpaCalc->calculateSemesterSummary($student, (int) $currentPeriodInfo['semester_id'], $resolvedPeriodYear)
+            : null;
+        $currentSemesterGpa = ($liveSemSummary && $liveSemSummary['is_complete']) ? $liveSemSummary['semester_gpa'] : null;
+
         return response()->json([
             'success' => true,
             'data' => [
                 'profile' => [
                     'name' => $student->user->name,
                     'student_code' => $student->student_code,
+                    'faculty' => $student->department->name ?? 'N/A',
+                    'faculty_code' => $student->department->code ?? 'N/A',
                     'program' => $student->program->code ?? 'N/A',
+                    'major' => $student->program->name ?? ($student->major ?? 'N/A'),
                     'cohort' => $student->classRoom->name ?? 'N/A',
+                    'academic_year' => $currentPeriodInfo['academic_year_name'],
+                    'year_level' => YearLevel::name($resolvedPeriodYear) ?? 'Unassigned',
+                    'year_level_number' => $resolvedPeriodYear,
+                    'year_level_code' => YearLevel::code($resolvedPeriodYear),
+                    'year_level_name' => YearLevel::name($resolvedPeriodYear),
+                    'year_level_khmer' => YearLevel::khmer($resolvedPeriodYear),
+                    'year_level_label' => YearLevel::label($resolvedPeriodYear),
+                    'progression_status' => $student->progression_status ?? 'in_progress',
                 ],
-                'current_period' => $latestEnrollment ? [
-                    'academic_year' => $latestEnrollment->courseOffering->academicYear->name ?? 'N/A',
-                    'study_year' => $latestEnrollment->courseOffering->study_year ?? 1,
-                    'semester' => $latestEnrollment->courseOffering->semester->name ?? 'N/A',
-                ] : null,
+                'current_period' => [
+                    'academic_year_id' => $currentPeriodInfo['academic_year_id'],
+                    'academic_year' => $currentPeriodInfo['academic_year_name'],
+                    'study_year' => $resolvedPeriodYear,
+                    'year_level_code' => YearLevel::code($resolvedPeriodYear),
+                    'year_level_label' => YearLevel::label($resolvedPeriodYear),
+                    'semester_id' => $currentPeriodInfo['semester_id'],
+                    'semester_number' => $currentPeriodInfo['semester_number'],
+                    'semester' => $currentPeriodInfo['semester_name'],
+                ],
                 'metrics' => [
                     'enrolled_courses' => $enrollments->count(),
                     'overall_attendance_rate' => $overallAttendanceRate,
-                    'cumulative_gpa' => $gpaRecord ? (float) $gpaRecord->gpa : null,
+                    'current_semester_gpa' => $currentSemesterGpa,
+                    'semester_gpa' => $currentSemesterGpa,
+                    'semester_average' => $liveSemSummary['semester_average'] ?? null,
+                    'cumulative_gpa' => $cumulativeGpa,
                 ]
             ]
         ]);
@@ -84,11 +129,11 @@ class StudentModuleController extends Controller
 
         $offerings = CourseOffering::whereHas('enrollments', function ($q) use ($student) {
             $q->where('student_id', $student->id)->where('status', 'enrolled');
-        })->with(['academicYear', 'semester', 'course'])->get();
+        })->with(['academicYear', 'semester', 'course', 'classRoom'])->get();
 
         $grouped = [];
         foreach ($offerings as $offering) {
-            $studyYear = $offering->study_year;
+            $studyYear = YearLevel::parse($offering->study_year ?? $offering->classRoom?->year_level ?? $offering->course?->year_level) ?? 0;
             $semesterName = $offering->semester->name ?? 'Unknown';
             $semesterStatus = $offering->semester->status ?? 'upcoming'; // active, completed, upcoming
 
@@ -103,6 +148,10 @@ class StudentModuleController extends Controller
             if (!isset($grouped[$studyYear])) {
                 $grouped[$studyYear] = [
                     'study_year' => $studyYear,
+                    'year_level' => $studyYear > 0 ? $studyYear : null,
+                    'year_level_code' => YearLevel::code($studyYear),
+                    'year_level_name' => YearLevel::name($studyYear),
+                    'year_level_label' => YearLevel::label($studyYear),
                     'academic_years' => [],
                     'semesters' => []
                 ];
@@ -154,11 +203,18 @@ class StudentModuleController extends Controller
         if ($request->filled('semester_id')) {
             $query->where('semester_id', $request->semester_id);
         }
-        if ($request->filled('study_year')) {
-            $query->where('study_year', $request->study_year);
+        if ($request->filled('study_year') || $request->filled('year_level')) {
+            $yl = YearLevel::parse($request->query('year_level', $request->query('study_year')));
+            if ($yl !== null) {
+                $query->where('study_year', $yl);
+            } else {
+                $query->whereRaw('1 = 0');
+            }
         }
 
         $courses = $query->get()->map(function ($offering) {
+            $yl = YearLevel::parse($offering->study_year ?? $offering->classRoom?->year_level ?? $offering->course?->year_level);
+
             return [
                 'course_offering_id' => $offering->id,
                 'course_name' => $offering->course->course_name,
@@ -167,7 +223,10 @@ class StudentModuleController extends Controller
                 'teachers' => $offering->activeTeachers->map(fn($t) => $t->user->name),
                 'semester' => $offering->semester->name ?? '',
                 'academic_year' => $offering->academicYear->name ?? '',
-                'study_year' => $offering->study_year,
+                'study_year' => $yl ?? $offering->study_year,
+                'year_level' => $yl,
+                'year_level_code' => YearLevel::code($yl),
+                'year_level_label' => YearLevel::label($yl),
             ];
         });
 
@@ -193,6 +252,8 @@ class StudentModuleController extends Controller
             return response()->json(['message' => 'Unauthorized or Course not found.'], 403);
         }
 
+        $offeringYl = YearLevel::parse($offering->study_year ?? $offering->classRoom?->year_level ?? $offering->course?->year_level);
+
         return response()->json([
             'success' => true,
             'data' => [
@@ -203,7 +264,10 @@ class StudentModuleController extends Controller
                 'teachers' => $offering->activeTeachers->map(fn($t) => $t->user->name),
                 'semester' => $offering->semester->name ?? '',
                 'academic_year' => $offering->academicYear->name ?? '',
-                'study_year' => $offering->study_year,
+                'study_year' => $offeringYl ?? $offering->study_year,
+                'year_level' => $offeringYl,
+                'year_level_code' => YearLevel::code($offeringYl),
+                'year_level_label' => YearLevel::label($offeringYl),
             ]
         ]);
     }
@@ -215,7 +279,7 @@ class StudentModuleController extends Controller
             return response()->json(['message' => 'Student profile not found.'], 404);
         }
 
-        $query = AttendanceDetail::where('student_id', $student->id)->with('attendance.courseOffering.course');
+        $query = AttendanceDetail::where('student_id', $student->id)->with(['attendance.courseOffering.course', 'attendance.course']);
 
         if ($request->filled('semester_id')) {
             $query->whereHas('attendance.courseOffering', function ($q) use ($request) {
@@ -223,9 +287,14 @@ class StudentModuleController extends Controller
             });
         }
 
-        if ($request->filled('study_year')) {
-            $query->whereHas('attendance.courseOffering', function ($q) use ($request) {
-                $q->where('study_year', $request->study_year);
+        if ($request->filled('study_year') || $request->filled('year_level')) {
+            $yl = YearLevel::parse($request->query('year_level', $request->query('study_year')));
+            $query->whereHas('attendance.courseOffering', function ($q) use ($yl) {
+                if ($yl !== null) {
+                    $q->where('study_year', $yl);
+                } else {
+                    $q->whereRaw('1 = 0');
+                }
             });
         }
 
@@ -233,20 +302,21 @@ class StudentModuleController extends Controller
         $total = $details->count();
         $present = $details->where('status', 'present')->count();
 
-        $coursesBreakdown = $details->groupBy(fn($d) => $d->attendance->courseOffering->id ?? 0)
+        $coursesBreakdown = $details->groupBy(fn ($d) => $d->attendance?->courseOffering?->id ?? $d->attendance?->course_id ?? 0)
             ->map(function ($group, $offeringId) {
-                $first = $group->first()->attendance->courseOffering;
+                $firstAtt = $group->first()?->attendance;
+                $first = $firstAtt?->courseOffering;
                 $t = $group->count();
                 $p = $group->where('status', 'present')->count();
                 return [
-                    'course_offering_id' => $offeringId,
-                    'course_name' => $first ? $first->course->course_name : 'Unknown',
+                    'course_offering_id' => $first?->id ?? $offeringId,
+                    'course_name' => $first?->course?->course_name ?? $firstAtt?->course?->course_name ?? 'Unknown',
                     'total' => $t,
                     'present' => $p,
                     'late' => $group->where('status', 'late')->count(),
                     'absent' => $group->where('status', 'absent')->count(),
                     'excused' => $group->where('status', 'excused')->count(),
-                    'percentage' => $t > 0 ? round(($p / $t) * 100, 2) : 0,
+                    'percentage' => $t > 0 ? round(($p / $t) * 100, 2) : null,
                 ];
             })->values();
 
@@ -259,7 +329,7 @@ class StudentModuleController extends Controller
                     'late' => $details->where('status', 'late')->count(),
                     'absent' => $details->where('status', 'absent')->count(),
                     'excused' => $details->where('status', 'excused')->count(),
-                    'percentage' => $total > 0 ? round(($present / $total) * 100, 2) : 0,
+                    'percentage' => $total > 0 ? round(($present / $total) * 100, 2) : null,
                 ],
                 'courses' => $coursesBreakdown
             ]
@@ -283,9 +353,9 @@ class StudentModuleController extends Controller
             ->with('attendance')
             ->get()->map(function ($d) {
                 return [
-                    'date' => $d->attendance->attendance_date,
+                    'date' => $d->attendance?->attendance_date,
                     'status' => $d->status,
-                    'topic' => $d->attendance->topic,
+                    'topic' => $d->attendance?->topic,
                 ];
             });
 
@@ -295,7 +365,7 @@ class StudentModuleController extends Controller
         $late = $details->where('status', 'late')->count();
         $absent = $details->where('status', 'absent')->count();
         $excused = $details->where('status', 'excused')->count();
-        $percentage = $total > 0 ? round(($present / $total) * 100, 2) : 0;
+        $percentage = $total > 0 ? round(($present / $total) * 100, 2) : null;
 
         return response()->json([
             'success' => true,
@@ -330,9 +400,14 @@ class StudentModuleController extends Controller
                 $q->where('semester_id', $request->semester_id);
             });
         }
-        if ($request->filled('study_year')) {
-            $query->whereHas('courseOffering', function($q) use ($request) {
-                $q->where('study_year', $request->study_year);
+        if ($request->filled('study_year') || $request->filled('year_level')) {
+            $yl = YearLevel::parse($request->query('year_level', $request->query('study_year')));
+            $query->whereHas('courseOffering', function ($q) use ($yl) {
+                if ($yl !== null) {
+                    $q->where('study_year', $yl);
+                } else {
+                    $q->whereRaw('1 = 0');
+                }
             });
         }
 
@@ -341,19 +416,67 @@ class StudentModuleController extends Controller
         $passed = $grades->where('letter_grade', '!=', 'F')->where('letter_grade', '!=', null)->count();
         $failed = $grades->where('letter_grade', 'F')->count();
 
+        $enrollPendingQuery = CourseEnrollment::where('student_id', $student->id)
+            ->whereIn('status', ['enrolled', 'active'])
+            ->with(['courseOffering.course', 'courseOffering.semester', 'courseOffering.academicYear']);
+        if ($request->filled('semester_id')) {
+            $enrollPendingQuery->where('semester_id', $request->semester_id);
+        }
+        if ($request->filled('study_year') || $request->filled('year_level')) {
+            $yl = YearLevel::parse($request->query('year_level', $request->query('study_year')));
+            $enrollPendingQuery->whereHas('courseOffering', function ($q) use ($yl) {
+                if ($yl !== null) {
+                    $q->where('study_year', $yl);
+                } else {
+                    $q->whereRaw('1 = 0');
+                }
+            });
+        }
+        $enrollments = $enrollPendingQuery->get();
+        $enrolledOfferingIds = $enrollments->pluck('course_offering_id')->filter()->unique();
+        $gradedOfferingIds = $grades->pluck('course_offering_id')->filter()->unique();
+        $pending = $enrolledOfferingIds->diff($gradedOfferingIds)->count();
+
         $mapped = $grades->map(function ($g) {
-            $course = $g->courseOffering?->course ?? $g->course;
+            $offering = $g->courseOffering;
+            $course = $offering?->course ?? $g->course;
             return [
                 'course_offering_id' => $g->course_offering_id,
                 'course_name' => $course?->course_name ?? 'Unknown',
+                'course_code' => $course?->course_code ?? '',
                 'credits' => $course?->credit ?? $course?->credits,
+                'semester' => $offering?->semester?->name ?? '',
+                'academic_year' => $offering?->academicYear?->name ?? '',
                 'total_score' => $g->total_score,
                 'letter_grade' => $g->letter_grade,
                 'status' => $g->status, // distinguishes Provisional vs Official
             ];
-        });
+        })->values();
 
-        // Compute Semester GPA if scoped by semester
+        // Include active enrolled courses without finalized grades (including draft-only) as pending, never leaking draft scores
+        $seenOfferings = $gradedOfferingIds->flip()->all();
+        foreach ($enrollments as $enrollment) {
+            $offeringId = $enrollment->course_offering_id;
+            if (!$offeringId || isset($seenOfferings[$offeringId])) {
+                continue;
+            }
+            $seenOfferings[$offeringId] = true;
+            $offering = $enrollment->courseOffering;
+            $course = $offering?->course;
+            $mapped->push([
+                'course_offering_id' => $offeringId,
+                'course_name' => $course?->course_name ?? 'Unknown',
+                'course_code' => $course?->course_code ?? '',
+                'credits' => $course?->credit ?? $course?->credits,
+                'semester' => $offering?->semester?->name ?? '',
+                'academic_year' => $offering?->academicYear?->name ?? '',
+                'total_score' => null,
+                'letter_grade' => null,
+                'status' => 'pending',
+            ]);
+        }
+
+        // Compute Semester GPA if scoped by semester, or cumulative GPA when unfiltered if records exist
         $gpaInfo = null;
         if ($request->filled('semester_id')) {
             $gpaRecord = GpaRecord::where('student_id', $student->id)->where('semester_id', $request->semester_id)->first();
@@ -363,18 +486,63 @@ class StudentModuleController extends Controller
                     'credit_hours' => $gpaRecord->earned_credits,
                 ];
             }
+        } else {
+            $gpaRecords = GpaRecord::where('student_id', $student->id)->get();
+            if ($gpaRecords->isNotEmpty()) {
+                $weightedPoints = 0.0;
+                $weightedCredits = 0.0;
+                foreach ($gpaRecords as $gr) {
+                    $cr = (float) ($gr->earned_credits ?: 0.0);
+                    if ($cr > 0) {
+                        $weightedPoints += ((float) $gr->gpa) * $cr;
+                        $weightedCredits += $cr;
+                    }
+                }
+                $cumGpa = $weightedCredits > 0
+                    ? round($weightedPoints / $weightedCredits, 2)
+                    : round((float) $gpaRecords->avg('gpa'), 2);
+                $gpaInfo = [
+                    'cumulative_gpa' => $cumGpa,
+                    'credit_hours' => $weightedCredits,
+                ];
+            }
         }
+
+        $gpaCalc = app(\App\Services\GpaCalculationService::class);
+        $currentPeriodInfo = $gpaCalc->resolveCurrentPeriod($student);
+        $currentSemSummary = $currentPeriodInfo['semester_id']
+            ? $gpaCalc->calculateSemesterSummary($student, (int) $currentPeriodInfo['semester_id'], $currentPeriodInfo['study_year'])
+            : null;
 
         return response()->json([
             'success' => true,
             'data' => [
+                'current_period' => [
+                    'academic_year_id' => $currentPeriodInfo['academic_year_id'],
+                    'academic_year' => $currentPeriodInfo['academic_year_name'],
+                    'study_year' => $currentPeriodInfo['study_year'],
+                    'year_level_code' => YearLevel::code($currentPeriodInfo['study_year']),
+                    'year_level_label' => YearLevel::label($currentPeriodInfo['study_year']),
+                    'semester_id' => $currentPeriodInfo['semester_id'],
+                    'semester_number' => $currentPeriodInfo['semester_number'],
+                    'semester' => $currentPeriodInfo['semester_name'],
+                ],
+                'current_semester' => $currentSemSummary,
                 'courses' => $mapped,
                 'summary' => [
                     'passed' => $passed,
                     'failed' => $failed,
-                    'pending' => 0 // Would count enrolled courses without grades
+                    'pending' => $pending,
+                    'semester_average' => $currentSemSummary['semester_average'] ?? null,
+                    'semester_average_display' => $currentSemSummary['semester_average_display'] ?? 'N/A',
+                    'semester_gpa' => $currentSemSummary['semester_gpa'] ?? null,
+                    'semester_gpa_display' => $currentSemSummary['semester_gpa_display'] ?? 'N/A',
                 ],
-                'gpa_info' => $gpaInfo
+                'gpa_info' => $gpaInfo ?? ($currentSemSummary ? [
+                    'semester_gpa' => $currentSemSummary['semester_gpa'],
+                    'semester_average' => $currentSemSummary['semester_average'],
+                    'credit_hours' => $currentSemSummary['earned_credits'],
+                ] : null),
             ]
         ]);
     }
@@ -400,7 +568,7 @@ class StudentModuleController extends Controller
 
         // 1. Assignments (Homework, Project, etc)
         $assignments = Assignment::where('course_offering_id', $id)->where('status', 'published')
-            ->with(['submissions' => fn($q) => $q->where('student_id', $student->id)])
+            ->with(['submissions' => fn($q) => $q->where('student_id', $student->id)->orderByDesc('version_number')->orderByDesc('id')])
             ->get();
 
         foreach ($assignments as $a) {
@@ -419,21 +587,26 @@ class StudentModuleController extends Controller
         }
 
         // 2. Quizzes
-        $quizzes = Quiz::where('course_offering_id', $id)->whereIn('status', ['published', 'closed'])
-            ->with(['attempts' => fn($q) => $q->where('student_id', $student->id)->orderByDesc('attempt_number')])
+        $quizzes = Quiz::where('course_offering_id', $id)->whereIn('status', ['published', 'open', 'closed'])
+            ->with(['attempts' => fn ($q) => $q->where('student_id', $student->id)->orderByDesc('attempt_number')])
             ->get();
 
+        $quizGrading = app(QuizGradingService::class);
         foreach ($quizzes as $q) {
-            $att = $q->attempts->first();
+            $effectiveScore = $quizGrading->calculateStudentQuizScore($q, $q->attempts);
+            $hasPending = $q->attempts->contains(fn ($a) => ! $a->is_reset && $a->isPendingManualGrading());
+            $pubStatus = $hasPending && $effectiveScore === null
+                ? 'Pending Grading'
+                : ($effectiveScore !== null ? 'Published' : 'Pending');
             $breakdown->push([
                 'component_name' => $q->title,
                 'type' => 'Quiz',
-                'earned_score' => $att ? $att->score : null,
+                'earned_score' => ($hasPending && $q->scoring_method === 'latest') ? null : $effectiveScore,
                 'maximum_score' => $q->total_score,
                 'weight' => null,
                 'assessment_date' => $q->start_at,
-                'publication_status' => ($att && $att->score !== null) ? 'Published' : 'Pending',
-                'teacher_feedback' => null
+                'publication_status' => $pubStatus,
+                'teacher_feedback' => null,
             ]);
         }
 
@@ -478,16 +651,25 @@ class StudentModuleController extends Controller
         // Determine if grade is Official based on status
         $isOfficial = $grade && in_array($grade->status, ['official', 'finalized', 'published']);
 
+        $gradeOfferingYl = YearLevel::parse($offering->study_year ?? $offering->classRoom?->year_level ?? $offering->course?->year_level);
+
         return response()->json([
             'success' => true,
             'data' => [
-                'course_name' => $offering->course->course_name,
-                'academic_year' => $offering->academicYear->name ?? '',
-                'study_year' => $offering->study_year,
-                'semester' => $offering->semester->name ?? '',
-                'teacher' => $offering->activeTeachers->first()->user->name ?? 'Unknown',
+                'course_name' => $offering?->course?->course_name ?? 'Course',
+                'academic_year' => $offering?->academicYear?->name ?? '',
+                'study_year' => $gradeOfferingYl ?? $offering?->study_year,
+                'year_level' => $gradeOfferingYl,
+                'year_level_code' => YearLevel::code($gradeOfferingYl),
+                'year_level_label' => YearLevel::label($gradeOfferingYl),
+                'semester' => $offering?->semester?->name ?? '',
+                'teacher' => $offering?->activeTeachers?->first()?->user?->name ?? 'Unknown',
                 'final_score' => $isOfficial ? $grade->total_score : null,
                 'letter_grade' => $isOfficial ? $grade->letter_grade : null,
+                'final_grade' => [
+                    'total_score' => $isOfficial ? $grade->total_score : null,
+                    'letter_grade' => $isOfficial ? $grade->letter_grade : null,
+                ],
                 'result_status' => $grade ? ucfirst($grade->status) : 'Pending',
                 'breakdown' => $breakdown
             ]
@@ -501,28 +683,60 @@ class StudentModuleController extends Controller
             return response()->json(['message' => 'Student profile not found.'], 404);
         }
 
+        $semesterId = $request->filled('semester_id') ? (int) $request->semester_id : null;
         $analyticsQuery = LearningAnalytic::where('student_id', $student->id);
 
-        if ($request->filled('semester_id')) {
-            $analyticsQuery->where('semester_id', $request->semester_id);
+        if ($semesterId) {
+            $analyticsQuery->where('semester_id', $semesterId);
         }
 
-        $latest = clone $analyticsQuery->latest('calculated_at')->first();
-        $history = clone $analyticsQuery->orderBy('period_start')->get();
+        $latest = (clone $analyticsQuery)->latest('calculated_at')->first();
+        $history = (clone $analyticsQuery)->orderBy('period_start')->get();
+
+        $trend = [];
+        if ($history->isNotEmpty()) {
+            $trend = $history->map(function ($a) {
+                return [
+                    'period' => $a->period_start,
+                    'attendance_rate' => $a->attendance_rate,
+                    'assignment_average' => $a->assignment_average,
+                    'quiz_average' => $a->quiz_average,
+                    'exam_average' => $a->exam_average,
+                    'overall_performance' => $a->overall_performance,
+                ];
+            })->values()->all();
+        } else {
+            $liveSeries = $this->calculator->buildTimeSeries($student, 'monthly', $semesterId);
+            $trend = array_map(fn (array $row) => [
+                'period' => $row['period_start'],
+                'attendance_rate' => $row['attendance_rate'],
+                'assignment_average' => $row['assignment_average'],
+                'quiz_average' => $row['quiz_average'],
+                'exam_average' => $row['exam_average'],
+                'overall_performance' => $row['overall_performance'],
+            ], $liveSeries);
+        }
+
+        $liveCurrent = $this->calculator->computeCurrentSummary($student, $semesterId);
+        $currentPayload = $latest ? [
+            'attendance_rate' => $latest->attendance_rate ?? $liveCurrent['attendance_rate'],
+            'assignment_average' => $latest->assignment_average ?? $liveCurrent['assignment_average'],
+            'quiz_average' => $latest->quiz_average ?? $liveCurrent['quiz_average'],
+            'exam_average' => $latest->exam_average ?? $liveCurrent['exam_average'],
+            'overall_performance' => $latest->overall_performance ?? $liveCurrent['overall_performance'],
+            'calculated_at' => $latest->calculated_at,
+        ] : $liveCurrent;
 
         return response()->json([
             'success' => true,
             'data' => [
-                'current' => $latest,
-                'trend' => $history->map(function($a) {
-                    return [
-                        'period' => $a->period_start,
-                        'attendance_rate' => $a->attendance_rate,
-                        'assignment_average' => $a->assignment_average,
-                        'quiz_average' => $a->quiz_average,
-                        'overall_performance' => $a->overall_performance
-                    ];
-                })
+                'current' => $currentPayload,
+                'attendance_rate' => $currentPayload['attendance_rate'],
+                'assignment_average' => $currentPayload['assignment_average'],
+                'quiz_average' => $currentPayload['quiz_average'],
+                'exam_average' => $currentPayload['exam_average'],
+                'overall_performance' => $currentPayload['overall_performance'],
+                'trend' => $trend,
             ]
         ]);
     }
@@ -548,22 +762,35 @@ class StudentModuleController extends Controller
         return response()->json([
             'success' => true,
             'data' => [
-                'risks' => $risks->map(function($r) {
+                'risks' => $risks->map(function ($r) {
+                    $rawFactors = $r->risk_factors;
+                    if (is_array($rawFactors)) {
+                        $factors = $rawFactors;
+                    } elseif (is_string($rawFactors) && trim($rawFactors) !== '') {
+                        $decoded = json_decode($rawFactors, true);
+                        $factors = is_array($decoded) ? $decoded : [$rawFactors];
+                    } else {
+                        $factors = [];
+                    }
+
                     return [
-                        'course' => $r->course->course_name ?? 'General',
+                        'course' => $r->course?->course_name ?? 'General',
                         'risk_level' => $r->risk_level,
                         'risk_score' => $r->risk_score,
-                        'factors' => json_decode($r->factors, true) ?? [],
-                        'last_updated' => $r->assessment_date
+                        'factors' => $factors,
+                        'last_updated' => $r->assessment_date,
                     ];
                 }),
-                'predictions' => $predictions->map(function($p) {
+                'predictions' => $predictions->map(function ($p) {
                     return [
-                        'course' => $p->course->course_name ?? 'General',
+                        'course' => $p->course?->course_name ?? 'General',
                         'predicted_score' => $p->predicted_score,
-                        'confidence_level' => $p->confidence_level,
-                        'factors' => json_decode($p->factors, true) ?? [],
-                        'last_updated' => $p->prediction_date
+                        'confidence_score' => $p->confidence_score,
+                        'confidence_level' => $p->confidence_score,
+                        'model_version' => $p->model_version,
+                        'notes' => $p->notes,
+                        'factors' => $p->notes ? [$p->notes] : [],
+                        'last_updated' => $p->prediction_date,
                     ];
                 })
             ]
@@ -578,17 +805,31 @@ class StudentModuleController extends Controller
         }
 
         $recs = Recommendation::where('student_id', $student->id)
-            ->where('status', 'pending')
+            ->whereNotIn('status', ['completed', 'dismissed'])
             ->with('course')
-            ->get()->map(function($r) {
+            ->latest()
+            ->get()
+            ->map(function ($r) {
+                $courseName = $r->course?->course_name;
+                $typeLabel = ucfirst(str_replace('_', ' ', (string) ($r->type ?? 'general')));
+                $actionLabel = match (strtolower((string) ($r->type ?? 'general'))) {
+                    'attendance' => $courseName ? "Attend all upcoming {$courseName} sessions" : 'Improve class attendance consistency',
+                    'assignment' => $courseName ? "Review pending assignments in {$courseName}" : 'Complete upcoming assignment tasks early',
+                    'quiz' => $courseName ? "Practice quiz topics for {$courseName}" : 'Review recent quiz feedback',
+                    'exam' => $courseName ? "Prepare study guide for {$courseName} exam" : 'Begin structured exam preparation',
+                    default => $courseName ? "Focus study plan on {$courseName}" : 'Follow mentor & system study guidance',
+                };
+
                 return [
                     'id' => $r->id,
                     'title' => $r->title,
-                    'reason' => $r->reason,
+                    'reason' => $r->message,
+                    'message' => $r->message,
                     'priority' => $r->priority,
-                    'action' => $r->suggested_action,
-                    'course_name' => $r->course->course_name ?? null,
-                    'indicator' => $r->relevant_indicator ?? 'General Performance'
+                    'status' => $r->status,
+                    'action' => $actionLabel,
+                    'course_name' => $courseName,
+                    'indicator' => $typeLabel,
                 ];
             });
 

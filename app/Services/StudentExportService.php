@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Student;
+use App\Support\YearLevel;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
@@ -38,8 +39,12 @@ class StudentExportService
         if (! empty($f['program_id'])) {
             $q->where('program_id', (int) $f['program_id']);
         }
-        if (! empty($f['year_level'])) {
-            $q->where('year_level', (string) $f['year_level']);
+        if (! empty($f['year_level']) && strtolower((string) $f['year_level']) !== 'all') {
+            if (strtolower((string) $f['year_level']) === 'missing') {
+                $q->missingYearLevel();
+            } else {
+                $q->forYearLevel($f['year_level']);
+            }
         }
         if (! empty($f['academic_year_id'])) {
             $q->whereHas('classRoom', fn ($c) => $c->where('academic_year_id', (int) $f['academic_year_id']));
@@ -64,7 +69,7 @@ class StudentExportService
         return array_map([StudentImportReportService::class, 'safe'], [
             $s->student_code, $s->khmer_name, $s->english_name ?: trim($s->first_name . ' ' . $s->last_name),
             $s->gender, $s->date_of_birth?->toDateString(), $s->place_of_birth, $s->address,
-            $s->department?->code, $s->program?->code, $s->year_level, $s->classRoom?->academicYear?->name, $s->status,
+            $s->department?->code, $s->program?->code, YearLevel::code($s->year_level) ?? $s->year_level, $s->resolveAcademicYearName(), $s->status,
             $fam?->father_khmer_name, $fam?->father_english_name, $fam?->father_phone,
             $fam?->mother_khmer_name, $fam?->mother_english_name, $fam?->mother_phone,
             $em?->name, $em?->relationship, $em?->phone,
@@ -113,6 +118,14 @@ class StudentExportService
 
     public static function filtersFrom(Request $r): array
     {
-        return $r->only(['ids', 'department_id', 'program_id', 'year_level', 'academic_year_id', 'semester_id', 'status']);
+        $filters = $r->only(['ids', 'department_id', 'program_id', 'year_level', 'academic_year_id', 'semester_id', 'status']);
+        if (empty($filters['department_id']) && $r->filled('faculty_id')) {
+            $filters['department_id'] = $r->input('faculty_id');
+        }
+        if (empty($filters['program_id']) && $r->filled('major_id')) {
+            $filters['program_id'] = $r->input('major_id');
+        }
+
+        return $filters;
     }
 }

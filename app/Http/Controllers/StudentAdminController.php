@@ -5,10 +5,12 @@ namespace App\Http\Controllers;
 use App\Exceptions\DuplicateStudentException;
 use App\Models\Student;
 use App\Models\StudentImportRow;
+use App\Rules\ValidYearLevel;
 use App\Services\StudentExportService;
 use App\Services\StudentImportReportService;
 use App\Services\StudentImportService;
 use App\Services\StudentImportValidationService;
+use App\Support\YearLevel;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -22,13 +24,38 @@ class StudentAdminController extends Controller
     /** Real database records for the Add Student / Export dropdowns. */
     public function lookups(): JsonResponse
     {
+        $classes = DB::table('classes')
+            ->where('status', 'active')
+            ->orderBy('code')
+            ->get(['id', 'code', 'name', 'department_id', 'academic_year_id', 'year_level'])
+            ->map(function ($c) {
+                $c->year_level_code = YearLevel::code($c->year_level);
+                $c->year_level_label = YearLevel::label($c->year_level);
+
+                return $c;
+            })->values();
+
+        $departments = DB::table('departments')
+            ->whereRaw("LOWER(COALESCE(status, 'active')) = 'active'")
+            ->orderBy('name')
+            ->get(['id', 'code', 'name', 'status']);
+        $programs = DB::table('programs')->where('status', 'active')->orderBy('name')
+            ->get(['id', 'department_id', 'code', 'name', 'duration_years']);
+        $courseCategories = \Illuminate\Support\Facades\Schema::hasTable('course_categories')
+            ? DB::table('course_categories')->where('status', 'active')->orderBy('name')->get(['id', 'code', 'name', 'description'])
+            : collect();
+
         return response()->json(['data' => [
-            'departments' => DB::table('departments')->orderBy('name')->get(['id', 'code', 'name']),
-            'programs' => DB::table('programs')->where('status', 'active')->orderBy('name')
-                ->get(['id', 'department_id', 'code', 'name', 'duration_years']),
+            'departments' => $departments,
+            'faculties' => $departments,
+            'programs' => $programs,
+            'majors' => $programs,
+            'course_categories' => $courseCategories,
             'academic_years' => DB::table('academic_years')->orderByDesc('id')->get(['id', 'name', 'status']),
             'semesters' => DB::table('semesters')->orderBy('academic_year_id')->orderBy('semester_number')
                 ->get(['id', 'academic_year_id', 'name', 'semester_number']),
+            'year_levels' => YearLevel::options(),
+            'classes' => $classes,
         ]]);
     }
 
@@ -39,6 +66,12 @@ class StudentAdminController extends Controller
         }
         if ($request->exists('date_of_birth') && trim((string) $request->input('date_of_birth')) === '') {
             $request->merge(['date_of_birth' => null]);
+        }
+        if (! $request->filled('department_id') && $request->filled('faculty_id')) {
+            $request->merge(['department_id' => $request->input('faculty_id')]);
+        }
+        if (! $request->filled('program_id') && $request->filled('major_id')) {
+            $request->merge(['program_id' => $request->input('major_id')]);
         }
 
         $in = $request->validate([
@@ -53,9 +86,10 @@ class StudentAdminController extends Controller
             'password' => 'nullable|string|max:100',
             'department_id' => 'required|integer|exists:departments,id',
             'program_id' => 'required|integer|exists:programs,id',
-            'year_level' => 'required|integer|min:1',
+            'year_level' => ['required', new ValidYearLevel()],
             'academic_year_id' => 'required|integer|exists:academic_years,id',
             'semester_id' => 'nullable|integer|exists:semesters,id',
+            'class_id' => 'nullable|integer|exists:classes,id',
             'father_khmer_name' => 'nullable|string|max:150',
             'father_english_name' => 'nullable|string|max:150',
             'father_phone' => 'nullable|string|max:30',
@@ -66,6 +100,9 @@ class StudentAdminController extends Controller
             'emergency_relationship' => 'nullable|string|max:80',
             'emergency_contact_phone' => 'nullable|string|max:30',
             'emergency_contact_address' => 'nullable|string|max:255',
+        ], [], [
+            'department_id' => 'faculty',
+            'program_id' => 'major',
         ]);
 
         if (\App\Support\PersonNameHelper::clean($in['khmer_name'] ?? null) === null
@@ -82,11 +119,15 @@ class StudentAdminController extends Controller
         $in['academic_year_code'] = DB::table('academic_years')->where('id', $in['academic_year_id'])->value('name');
         $in['semester_code'] = ! empty($in['semester_id'])
             ? (string) DB::table('semesters')->where('id', $in['semester_id'])->value('semester_number') : '';
+        $in['year_level'] = (string) YearLevel::parse($in['year_level']);
 
         $row = $validator->normalize($in);
         $result = $validator->validate($row);
         if ($result['errors']) {
             return response()->json(['message' => 'Validation failed.', 'errors' => ['student' => $result['errors']]], 422);
+        }
+        if (! empty($in['class_id'])) {
+            $result['data']['_ids']['class_id'] = (int) $in['class_id'];
         }
 
         try {
@@ -105,6 +146,9 @@ class StudentAdminController extends Controller
                 'student_identifier' => $created['student']->student_code,
                 'username' => $created['student']->student_code,
                 'role' => 'student',
+                'year_level' => $created['student']->year_level,
+                'year_level_code' => $created['student']->year_level_code,
+                'year_level_label' => $created['student']->year_level_label,
                 'initial_password' => $created['temp_password'],
                 'temporary_password' => $created['temp_password'],
             ],

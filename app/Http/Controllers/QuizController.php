@@ -35,21 +35,30 @@ class QuizController extends Controller
 
     public function store(Request $request)
     {
+        if ($request->has('max_attempts') && (string) $request->input('max_attempts') === '0') {
+            $request->merge(['max_attempts' => null]);
+        }
+
         $validated = $request->validate([
             'course_id' => 'required|integer|exists:courses,id',
             'teacher_id' => 'required|integer|exists:teachers,id',
             'semester_id' => 'required|integer|exists:semesters,id',
+            'course_offering_id' => 'nullable|integer|exists:course_offerings,id',
             'title' => 'required|string|max:200',
             'description' => 'nullable|string',
             'total_score' => 'required|numeric|min:0',
             'duration_minutes' => 'required|integer|min:1',
             'start_at' => 'nullable|date',
             'end_at' => 'nullable|date|after_or_equal:start_at',
+            'max_attempts' => 'nullable|integer|in:1,2,3,5',
+            'scoring_method' => 'nullable|string|in:highest,latest,average',
+            'allow_late_submission' => 'nullable|boolean',
             'status' => 'nullable|string|in:draft,published,open,closed',
         ]);
 
         $quiz = Quiz::create([
             'course_id' => $validated['course_id'],
+            'course_offering_id' => $validated['course_offering_id'] ?? null,
             'teacher_id' => $validated['teacher_id'],
             'semester_id' => $validated['semester_id'],
             'title' => $validated['title'],
@@ -58,6 +67,9 @@ class QuizController extends Controller
             'duration_minutes' => $validated['duration_minutes'],
             'start_at' => $validated['start_at'] ?? null,
             'end_at' => $validated['end_at'] ?? null,
+            'max_attempts' => array_key_exists('max_attempts', $validated) ? $validated['max_attempts'] : 1,
+            'scoring_method' => $validated['scoring_method'] ?? 'highest',
+            'allow_late_submission' => (bool) ($validated['allow_late_submission'] ?? false),
             'status' => $validated['status'] ?? 'published',
         ]);
 
@@ -79,6 +91,10 @@ class QuizController extends Controller
 
     public function update(Request $request, Quiz $quiz)
     {
+        if ($request->has('max_attempts') && (string) $request->input('max_attempts') === '0') {
+            $request->merge(['max_attempts' => null]);
+        }
+
         $validated = $request->validate([
             'title' => 'required|string|max:200',
             'description' => 'nullable|string',
@@ -86,6 +102,9 @@ class QuizController extends Controller
             'duration_minutes' => 'required|integer|min:1',
             'start_at' => 'nullable|date',
             'end_at' => 'nullable|date|after_or_equal:start_at',
+            'max_attempts' => 'nullable|integer|in:1,2,3,5',
+            'scoring_method' => 'nullable|string|in:highest,latest,average',
+            'allow_late_submission' => 'nullable|boolean',
             'status' => 'nullable|string|in:draft,published,open,closed',
         ]);
 
@@ -99,10 +118,21 @@ class QuizController extends Controller
 
     public function destroy(Quiz $quiz)
     {
-        $quiz->delete();
+        if ($quiz->attempts()->exists()) {
+            $quiz->update(['status' => 'archived']);
+            $quiz->delete();
+
+            return response()->json([
+                'message' => 'Quiz archived safely with existing attempts preserved.',
+                'archived' => true,
+            ], 200);
+        }
+
+        $quiz->forceDelete();
 
         return response()->json([
             'message' => 'Quiz deleted successfully.',
+            'archived' => false,
         ], 200);
     }
 }

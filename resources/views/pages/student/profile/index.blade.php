@@ -6,15 +6,18 @@
 
 @php
     $user = Auth::user();
-    $student = $student ?? \App\Models\Student::where('user_id', $user->id)->first();
+    $student = $student ?? \App\Models\Student::with(['department', 'classRoom.academicYear', 'program', 'courseEnrollments.semester.academicYear'])->where('user_id', $user->id)->first();
     $fullName = trim(($student->first_name ?? '') . ' ' . ($student->last_name ?? ''));
     $displayName = $fullName !== '' ? $fullName : ($user->name ?? 'Student');
     $initials = strtoupper(substr(preg_replace('/[^A-Za-z]/', '', $displayName), 0, 2) ?: 'ST');
     $studentId = $student->student_id ?? 'N/A';
     $department = $student->department?->name ?? 'Not assigned';
-    $major = $student->major ?? 'Not assigned';
-    $yearLevel = $student->year_level ?? 'N/A';
-    $semester = $student->semester ?? 'N/A';
+    $major = $student->program?->name ?? ($student->major ?: 'Not assigned');
+    $academicYear = $student?->resolveAcademicYearName() ?? 'Not assigned';
+    $yearLevel = $student?->year_level_label ?? ($student?->year_level ?: 'Not assigned');
+    $yearLevelCode = $student?->year_level_code;
+    $semester = $student?->resolveSemesterName() ?? 'N/A';
+    $className = $student?->classRoom?->code ?? $student?->classRoom?->name ?? 'Not assigned';
     $phone = $student->phone ?? 'Not provided';
     $address = $student->address ?? 'Not provided';
     $gender = $student->gender ?? 'Not set';
@@ -148,7 +151,7 @@
                             <div class="d-flex">
                                 <div class="text-primary me-3"><i class="bi bi-building"></i></div>
                                 <div class="flex-grow-1">
-                                    <div class="small text-secondary">Department</div>
+                                    <div class="small text-secondary">Faculty</div>
                                     <div class="fw-semibold text-dark">{{ $department }}</div>
                                 </div>
                             </div>
@@ -166,10 +169,30 @@
 
                         <div class="col-12">
                             <div class="d-flex">
+                                <div class="text-primary me-3"><i class="bi bi-calendar3"></i></div>
+                                <div class="flex-grow-1">
+                                    <div class="small text-secondary">Academic Year</div>
+                                    <div class="fw-semibold text-dark">{{ $academicYear }}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-12">
+                            <div class="d-flex">
                                 <div class="text-primary me-3"><i class="bi bi-layers"></i></div>
                                 <div class="flex-grow-1">
-                                    <div class="small text-secondary">Year Level</div>
+                                    <div class="small text-secondary">Student Year Level</div>
                                     <div class="fw-semibold text-dark">{{ $yearLevel }}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-12">
+                            <div class="d-flex">
+                                <div class="text-primary me-3"><i class="bi bi-door-open"></i></div>
+                                <div class="flex-grow-1">
+                                    <div class="small text-secondary">Class</div>
+                                    <div class="fw-semibold text-dark">{{ $className }}</div>
                                 </div>
                             </div>
                         </div>

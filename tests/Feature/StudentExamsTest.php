@@ -48,24 +48,47 @@ class StudentExamsTest extends TestCase
         CourseEnrollment::create(['student_id' => $s2->id, 'course_id' => $enrolledCourse->id, 'semester_id' => $semester->id, 'status' => 'enrolled']);
 
         $base = ['teacher_id' => $teacher->id, 'semester_id' => $semester->id, 'exam_type' => 'midterm', 'total_score' => 100];
-        $completed = Exam::create($base + ['course_id' => $enrolledCourse->id, 'title' => 'Midterm', 'exam_date' => '2026-10-01', 'status' => 'completed']);
+        $completed = Exam::create($base + ['course_id' => $enrolledCourse->id, 'title' => 'Midterm', 'exam_date' => '2026-10-01', 'start_time' => '09:00', 'end_time' => '10:30', 'duration_minutes' => 90, 'venue' => 'Room 101', 'description' => 'Paper exam', 'status' => 'completed']);
+        $unpublished = Exam::create($base + ['course_id' => $enrolledCourse->id, 'title' => 'Pending Final', 'exam_date' => '2026-11-28', 'start_time' => '14:00', 'end_time' => '16:00', 'duration_minutes' => 120, 'status' => 'results_pending']);
         Exam::create($base + ['course_id' => $enrolledCourse->id, 'title' => 'Final', 'exam_date' => '2026-12-10', 'status' => 'scheduled']);
         Exam::create($base + ['course_id' => $enrolledCourse->id, 'title' => 'Cancelled', 'exam_date' => '2026-11-01', 'status' => 'cancelled']);
         Exam::create($base + ['course_id' => $otherCourse->id, 'title' => 'Other', 'exam_date' => '2026-11-05', 'status' => 'scheduled']);
 
-        ExamResult::create(['exam_id' => $completed->id, 'student_id' => $s1->id, 'score' => 85, 'grade' => 'A']);
-        ExamResult::create(['exam_id' => $completed->id, 'student_id' => $s2->id, 'score' => 40, 'grade' => 'F']);
+        ExamResult::create(['exam_id' => $completed->id, 'student_id' => $s1->id, 'score' => 85, 'grade' => 'A-']);
+        $s2CompletedRes = ExamResult::create(['exam_id' => $completed->id, 'student_id' => $s2->id, 'score' => 40, 'grade' => 'F']);
+        // Even if results exist in DB for an unpublished exam, students must never see them
+        ExamResult::create(['exam_id' => $unpublished->id, 'student_id' => $s1->id, 'score' => 91, 'grade' => 'A']);
 
         $response = $this->actingAs($u1)->getJson('/api/student/exams?student_id=' . $s2->id);
 
         $response->assertOk()
-            ->assertJsonCount(2, 'data')
+            ->assertJsonCount(3, 'data')
             ->assertJsonPath('data.0.title', 'Midterm')
-            ->assertJsonPath('data.1.title', 'Final')
+            ->assertJsonPath('data.0.start_time', '09:00')
+            ->assertJsonPath('data.0.end_time', '10:30')
+            ->assertJsonPath('data.0.venue', 'Room 101')
+            ->assertJsonPath('data.0.display_status', 'Results Published')
+            ->assertJsonPath('data.1.title', 'Pending Final')
+            ->assertJsonPath('data.1.display_status', 'Results Pending')
+            ->assertJsonPath('data.2.title', 'Final')
+            ->assertJsonPath('data.2.display_status', 'Scheduled')
             ->assertJsonCount(1, 'data.0.results')
             ->assertJsonPath('data.0.results.0.student_id', $s1->id)
-            ->assertJsonCount(0, 'data.1.results');
+            ->assertJsonPath('data.0.results.0.result_status', 'Pass')
+            ->assertJsonCount(0, 'data.1.results')
+            ->assertJsonCount(0, 'data.2.results');
 
-        $this->assertEquals(85, $response->json('data.0.results.0.score'));
+        $this->assertEquals(85, (float) $response->json('data.0.results.0.score'));
+        $this->assertEquals(85.0, (float) $response->json('data.0.results.0.percentage'));
+
+        // Student cannot view another student's direct ExamResult resource (404)
+        $this->actingAs($u1)->getJson("/api/exam-results/{$s2CompletedRes->id}")->assertStatus(404);
+
+        // Student cannot create or take exam results directly (403)
+        $this->actingAs($u1)->postJson('/api/exam-results', [
+            'exam_id' => $completed->id,
+            'student_id' => $s1->id,
+            'score' => 100,
+        ])->assertStatus(403);
     }
 }

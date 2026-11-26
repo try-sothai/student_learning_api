@@ -11,7 +11,7 @@
     $maxGpa = $gpaProgression->max('gpa') ?: 4.0;
 @endphp
 <div class="student-page">
-    @include('components.student.page-header', ['title' => 'Academic Analytics', 'subtitle' => 'Understand your learning progress and focus your next study session.', 'action' => ''])
+    @include('components.student.page-header', ['title' => 'Academic Analytics', 'subtitle' => 'Understand your learning progress and focus your next study session.' . (!empty($studentProfile) ? ' · ' . ($studentProfile->year_level_label ?? ($studentProfile->year_level ?: 'Unassigned')) . ($studentProfile->resolveAcademicYearName() ? ' (' . $studentProfile->resolveAcademicYearName() . ')' : '') : ''), 'action' => ''])
 
     <div class="row g-3 mb-4">
         @foreach ([['Overall GPA', $gpaLabel, 'graph-up-arrow'], ['Attendance rate', $attendanceLabel, 'calendar-check'], ['Assignments', $assignmentsLabel, 'journal-check'], ['Quiz average', $quizLabel, 'patch-question']] as [$label, $value, $icon])

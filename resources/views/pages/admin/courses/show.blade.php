@@ -19,10 +19,11 @@
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Course name</dt><dd class="col-sm-8 col-lg-9 py-2">{{ $course->name }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Course code</dt><dd class="col-sm-8 col-lg-9 py-2">{{ $course->code }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Description</dt><dd class="col-sm-8 col-lg-9 py-2">{{ $course->description ?: 'Not set' }}</dd>
-            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Department</dt><dd class="col-sm-8 col-lg-9 py-2">{{ $course->department ?: 'Not set' }}</dd>
+            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Faculty</dt><dd class="col-sm-8 col-lg-9 py-2">{{ $course->department ?: 'Not set' }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Credits</dt><dd class="col-sm-8 col-lg-9 py-2">{{ $course->credits ?? 'Not set' }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Teacher</dt><dd class="col-sm-8 col-lg-9 py-2">{{ $course->teacher?->user?->name ?? ($course->teacher_id ? 'Teacher #' . $course->teacher_id : 'Not assigned') }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Academic year</dt><dd class="col-sm-8 col-lg-9 py-2">{{ $course->academic_year ?: 'Not set' }}</dd>
+            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Student year level</dt><dd class="col-sm-8 col-lg-9 py-2"><span class="badge bg-info-subtle text-info-emphasis rounded-pill">{{ $course->year_level_label ?? __('Cross-year / All levels') }}</span></dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Semester</dt><dd class="col-sm-8 col-lg-9 py-2">{{ $course->semester ?: 'Not set' }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Class schedule</dt><dd class="col-sm-8 col-lg-9 py-2">{{ $course->day_of_week ? $course->day_of_week . ' · ' : '' }}{{ $course->start_time ? \Carbon\Carbon::parse($course->start_time)->format('H:i') : 'Not set' }}{{ $course->end_time ? ' - ' . \Carbon\Carbon::parse($course->end_time)->format('H:i') : '' }}{{ $course->room ? ' · ' . $course->room : '' }}{{ !$course->day_of_week && !$course->start_time && !$course->end_time && !$course->room ? 'Not set' : '' }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Status</dt><dd class="col-sm-8 col-lg-9 py-2">{{ ucfirst($course->status) }}</dd>
@@ -56,7 +57,7 @@
                 @csrf
                 <select name="student_ids[]" class="form-select form-select-sm" multiple size="5" style="min-width: 280px" aria-label="Choose students to enroll" required>
                     @foreach($availableStudents as $student)
-                        <option value="{{ $student->id }}">{{ $student->user?->name ?? trim($student->first_name . ' ' . $student->last_name) }} · {{ $student->student_id }}</option>
+                        <option value="{{ $student->id }}">{{ $student->user?->name ?? trim($student->first_name . ' ' . $student->last_name) }} · {{ $student->student_id }} · {{ $student->year_level_code ?? __('Unassigned') }}</option>
                     @endforeach
                 </select>
                 <button class="btn btn-sm btn-primary" type="submit" @disabled($availableStudents->isEmpty())><i class="bi bi-person-plus me-1"></i>Enroll students</button>
@@ -66,9 +67,9 @@
         @if($course->students->isEmpty())
             <p class="text-muted text-center py-4 mb-0">No students are enrolled yet.</p>
         @else
-            <div class="table-responsive"><table class="table portal-table align-middle mb-0"><thead><tr><th>Student</th><th>Student ID</th><th>Enrollment status</th><th class="text-end">Actions</th></tr></thead><tbody>
+            <div class="table-responsive"><table class="table portal-table align-middle mb-0"><thead><tr><th>Student</th><th>Student ID</th><th>Year level</th><th>Enrollment status</th><th class="text-end">Actions</th></tr></thead><tbody>
                 @foreach($course->students as $student)
-                    <tr><td>{{ $student->user?->name ?? trim($student->first_name . ' ' . $student->last_name) }}</td><td>{{ $student->student_id }}</td><td>{{ ucfirst($student->pivot->status) }}</td><td class="text-end"><form method="POST" action="{{ route('admin.courses.students.destroy', [$course, $student]) }}" onsubmit="return confirm('Remove this student from the course?')">@csrf @method('DELETE')<button class="btn btn-sm btn-outline-danger" type="submit" aria-label="Remove {{ $student->student_id }}"><i class="bi bi-person-dash"></i></button></form></td></tr>
+                    <tr><td>{{ $student->user?->name ?? trim($student->first_name . ' ' . $student->last_name) }}</td><td>{{ $student->student_id }}</td><td><span class="badge {{ $student->year_level_code ? 'bg-primary-subtle text-primary' : 'bg-warning-subtle text-warning-emphasis' }} rounded-pill">{{ $student->year_level_label ?? __('Unassigned') }}</span></td><td>{{ ucfirst($student->pivot->status) }}</td><td class="text-end"><form method="POST" action="{{ route('admin.courses.students.destroy', [$course, $student]) }}" onsubmit="return confirm('Remove this student from the course?')">@csrf @method('DELETE')<button class="btn btn-sm btn-outline-danger" type="submit" aria-label="Remove {{ $student->student_id }}"><i class="bi bi-person-dash"></i></button></form></td></tr>
                 @endforeach
             </tbody></table></div>
         @endif

@@ -9,16 +9,45 @@ class PerformanceRecordController extends Controller
 {
     public function index(Request $request)
     {
-        $query = PerformanceRecord::with(['student.user', 'course', 'semester']);
+        $user = $this->resolveApiUser($request);
+        if (! $user) {
+            return response()->json(['message' => 'Unauthenticated.'], 401);
+        }
 
-        $user = $request->user();
-        if ($user && $user->role === 'student') {
-            if (!$user->student) {
+        $query = PerformanceRecord::with(['student.user', 'student.classRoom.academicYear', 'course', 'semester.academicYear']);
+
+        if ($user->role === 'student') {
+            if (! $user->student) {
                 return response()->json(['message' => 'Student profile not found.'], 404);
             }
             $query->where('student_id', $user->student->id);
-        } elseif ($request->has('student_id')) {
-            $query->where('student_id', $request->student_id);
+        } elseif ($user->role === 'teacher') {
+            $teacher = $this->resolveTeacherForUser($user);
+            $authorizedIds = $teacher ? $this->teacherAuthService()->getAuthorizedStudentIds($teacher) : [];
+            if (empty($authorizedIds)) {
+                $query->whereRaw('1 = 0');
+            } else {
+                $query->whereIn('student_id', $authorizedIds);
+            }
+            if ($request->has('student_id')) {
+                $query->where('student_id', (int) $request->student_id);
+            }
+        } elseif ($user->role === 'admin') {
+            if ($request->has('student_id')) {
+                $query->where('student_id', $request->student_id);
+            }
+        } else {
+            return response()->json(['message' => 'Unauthorized action.'], 403);
+        }
+
+        if ($request->filled('academic_year_id')) {
+            $ayId = (int) $request->academic_year_id;
+            $query->whereHas('semester', fn ($q) => $q->where('academic_year_id', $ayId));
+        }
+
+        if ($request->filled('year_level') && strtolower((string) $request->query('year_level')) !== 'all') {
+            $yl = (string) $request->query('year_level');
+            $query->whereHas('student', fn ($sq) => strtolower($yl) === 'missing' ? $sq->missingYearLevel() : $sq->forYearLevel($yl));
         }
 
         if ($request->has('course_id')) {
@@ -59,6 +88,10 @@ class PerformanceRecordController extends Controller
             'performance_level' => 'nullable|string|max:50',
         ]);
 
+        if ($denied = $this->authorizeStudentScopedAccess($request, (int) $validated['student_id'], (int) $validated['course_id'], false)) {
+            return $denied;
+        }
+
         $record = PerformanceRecord::create([
             'student_id' => $validated['student_id'],
             'course_id' => $validated['course_id'],
@@ -80,16 +113,10 @@ class PerformanceRecordController extends Controller
         ], 201);
     }
 
-    public function show(PerformanceRecord $performanceRecord)
+    public function show(Request $request, PerformanceRecord $performanceRecord)
     {
-        $user = request()->user();
-        if ($user && $user->role === 'student') {
-            if (!$user->student) {
-                return response()->json(['message' => 'Student profile not found.'], 404);
-            }
-            if ($performanceRecord->student_id !== $user->student->id) {
-                return response()->json(['message' => 'Unauthorized access.'], 403);
-            }
+        if ($denied = $this->authorizeStudentScopedAccess($request, (int) $performanceRecord->student_id)) {
+            return $denied;
         }
 
         return response()->json([
@@ -100,9 +127,13 @@ class PerformanceRecordController extends Controller
 
     public function update(Request $request, PerformanceRecord $performanceRecord)
     {
-        $user = $request->user();
-        if (!$user || !in_array($user->role, ['admin', 'teacher'])) {
-            return response()->json(['message' => 'Unauthorized action.'], 403);
+        if ($denied = $this->authorizeStudentScopedAccess(
+            $request,
+            (int) $performanceRecord->student_id,
+            $performanceRecord->course_id ? (int) $performanceRecord->course_id : null,
+            false
+        )) {
+            return $denied;
         }
 
         $validated = $request->validate([
@@ -122,11 +153,15 @@ class PerformanceRecordController extends Controller
         ], 200);
     }
 
-    public function destroy(PerformanceRecord $performanceRecord)
+    public function destroy(Request $request, PerformanceRecord $performanceRecord)
     {
-        $user = request()->user();
-        if (!$user || !in_array($user->role, ['admin', 'teacher'])) {
-            return response()->json(['message' => 'Unauthorized action.'], 403);
+        if ($denied = $this->authorizeStudentScopedAccess(
+            $request,
+            (int) $performanceRecord->student_id,
+            $performanceRecord->course_id ? (int) $performanceRecord->course_id : null,
+            false
+        )) {
+            return $denied;
         }
 
         $performanceRecord->delete();

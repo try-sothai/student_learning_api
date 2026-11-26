@@ -5,17 +5,20 @@ namespace App\Http\Controllers;
 use App\Models\Assignment;
 use App\Models\AssignmentSubmission;
 use App\Services\AssessmentAccessService;
+use App\Services\AssessmentReopenService;
 use App\Services\SubmissionFileService;
 use App\Support\PersonNameHelper;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Symfony\Component\HttpFoundation\Response as HttpResponse;
 
 class AssignmentSubmissionController extends Controller
 {
     public function __construct(
         protected AssessmentAccessService $access,
-        protected SubmissionFileService $submissionFiles
+        protected SubmissionFileService $submissionFiles,
+        protected AssessmentReopenService $reopenService,
     ) {}
 
     public function index(Request $request)
@@ -40,9 +43,13 @@ class AssignmentSubmissionController extends Controller
             $query->where('assignment_id', $request->assignment_id);
         }
 
+        if ($request->boolean('latest_only')) {
+            $query->where('is_latest', true);
+        }
+
         return response()->json([
             'message' => 'Assignment submissions retrieved successfully.',
-            'data' => $query->latest()->get(),
+            'data' => $query->orderByDesc('version_number')->orderByDesc('id')->get(),
         ], 200);
     }
 
@@ -50,54 +57,141 @@ class AssignmentSubmissionController extends Controller
     {
         $student = $request->user()?->student;
         if (! $student) {
-            return response()->json(['message' => 'Only students can submit assignments.'], 403);
+            return response()->json([
+                'success' => false,
+                'message' => 'Only students can submit assignments.',
+            ], 403);
         }
 
         $validated = $request->validate([
             'assignment_id' => 'required|integer|exists:assignments,id',
-            'file_path' => 'nullable|string',
+            'file_path' => 'nullable|string|max:500',
+            'submission_text' => 'nullable|string|max:20000',
             'submission_file' => 'nullable|file|mimes:pdf,doc,docx,zip,png,jpg,jpeg,txt|max:10240',
         ]);
 
-        // The assignment must be published AND belong to a course offering this student is enrolled in.
-        $assignment = Assignment::findOrFail($validated['assignment_id']);
-        if (! in_array($assignment->status, ['published'], true) || ! $this->access->studentCanAccess($student, $assignment)) {
-            return response()->json(['message' => 'Assignment not found or you are not enrolled in this course.'], 404);
-        }
-
-        $existing = AssignmentSubmission::where('assignment_id', $assignment->id)->where('student_id', $student->id)->first();
-        if ($existing && $existing->status === 'graded') {
-            return response()->json(['message' => 'This submission has already been graded and can no longer be changed.'], 409);
-        }
-
-        $filePath = $validated['file_path'] ?? null;
-        $originalFileName = $existing?->original_file_name;
-        $mimeType = $existing?->mime_type;
-        $fileSize = $existing?->file_size;
-
+        // Pre-upload file if attached before acquiring row locks, clean up if rejected.
+        $uploadedMeta = null;
         if ($request->hasFile('submission_file')) {
             $uploaded = $request->file('submission_file');
-            $filePath = $uploaded->store('submissions', 'public');
-            $originalFileName = $uploaded->getClientOriginalName();
-            $mimeType = $uploaded->getClientMimeType() ?: $uploaded->getMimeType();
-            $fileSize = $uploaded->getSize();
+            $uploadedMeta = [
+                'file_path' => $uploaded->store('submissions', 'public'),
+                'original_file_name' => $uploaded->getClientOriginalName(),
+                'mime_type' => $uploaded->getClientMimeType() ?: $uploaded->getMimeType(),
+                'file_size' => $uploaded->getSize(),
+            ];
         }
 
-        $isLate = $assignment->due_date && now()->gt($assignment->due_date);
+        $txResult = DB::transaction(function () use ($validated, $student, $uploadedMeta) {
+            $assignment = Assignment::whereKey($validated['assignment_id'])->lockForUpdate()->firstOrFail();
 
-        $submission = AssignmentSubmission::updateOrCreate(
-            ['assignment_id' => $assignment->id, 'student_id' => $student->id],
-            [
+            if (! $this->access->studentCanAccess($student, $assignment)) {
+                return ['error' => 'Assignment not found or you are not enrolled in this course.', 'status' => 404];
+            }
+
+            $status = strtolower((string) $assignment->status);
+            if (in_array($status, ['draft', 'archived'], true)) {
+                return ['error' => 'Assignment not found or you are not enrolled in this course.', 'status' => 404];
+            }
+
+            $existingRows = AssignmentSubmission::where('assignment_id', $assignment->id)
+                ->where('student_id', $student->id)
+                ->lockForUpdate()
+                ->orderByDesc('version_number')
+                ->orderByDesc('id')
+                ->get();
+
+            $access = $this->reopenService->evaluateAssignmentAccess($assignment, $student);
+
+            if (! $access['can_submit']) {
+                $httpStatus = 422;
+                if ($access['used_attempts'] > 0 && (! $access['allow_resubmission'] || $access['remaining_attempts'] <= 0)) {
+                    $httpStatus = 409;
+                } elseif (! $access['allow_submission']) {
+                    $httpStatus = 403;
+                }
+
+                return [
+                    'error' => $access['blocked_reason'] ?: 'You do not have permission to submit this assignment.',
+                    'status' => $httpStatus,
+                    'errors' => ['permission' => [$access['blocked_reason'] ?: 'Submission not permitted.']],
+                ];
+            }
+
+            $latest = $existingRows->first();
+            $incomingFileName = $uploadedMeta['original_file_name'] ?? null;
+            $incomingFileSize = $uploadedMeta['file_size'] ?? null;
+            $incomingText = $validated['submission_text'] ?? null;
+            $incomingFilePath = $uploadedMeta['file_path'] ?? ($validated['file_path'] ?? null);
+
+            if ($latest && $latest->submitted_at && $latest->submitted_at->diffInSeconds(now()) <= 2) {
+                $overrideAfterLatest = $access['override_model']
+                    && $access['override_model']->updated_at
+                    && $access['override_model']->updated_at->gt($latest->submitted_at);
+
+                $samePayload = $latest->original_file_name === $incomingFileName
+                    && (int) ($latest->file_size ?? 0) === (int) ($incomingFileSize ?? 0)
+                    && (string) ($latest->submission_text ?? '') === (string) ($incomingText ?? '')
+                    && (string) ($latest->file_path ?? '') === (string) ($incomingFilePath ?? '');
+
+                if (! $overrideAfterLatest && $samePayload) {
+                    return [
+                        'error' => 'Duplicate submission detected. Please wait before submitting again.',
+                        'status' => 409,
+                    ];
+                }
+            }
+
+            if ($existingRows->isNotEmpty()) {
+                AssignmentSubmission::where('assignment_id', $assignment->id)
+                    ->where('student_id', $student->id)
+                    ->where('is_latest', true)
+                    ->update(['is_latest' => false]);
+            }
+
+            $nextVersion = ((int) $existingRows->max('version_number')) + 1;
+            $isLate = $access['window_state'] === 'late_open';
+
+            $submission = AssignmentSubmission::create([
+                'assignment_id' => $assignment->id,
+                'student_id' => $student->id,
+                'version_number' => $nextVersion,
                 'submitted_at' => now(),
-                'file_path' => $filePath ?? $existing?->file_path,
-                'original_file_name' => $originalFileName,
-                'mime_type' => $mimeType,
-                'file_size' => $fileSize,
+                'is_late' => $isLate,
                 'status' => $isLate ? 'late' : 'submitted',
-            ]
-        );
+                'is_latest' => true,
+                'override_id' => $access['override_model']?->id,
+                'file_path' => $incomingFilePath,
+                'original_file_name' => $incomingFileName,
+                'mime_type' => $uploadedMeta['mime_type'] ?? null,
+                'file_size' => $incomingFileSize,
+                'submission_text' => $incomingText,
+            ]);
+
+            return ['submission' => $submission];
+        });
+
+        if (isset($txResult['error'])) {
+            if ($uploadedMeta && ! empty($uploadedMeta['file_path'])) {
+                \Illuminate\Support\Facades\Storage::disk('public')->delete($uploadedMeta['file_path']);
+            }
+
+            $body = [
+                'success' => false,
+                'message' => $txResult['error'],
+            ];
+            if (! empty($txResult['errors'])) {
+                $body['errors'] = $txResult['errors'];
+            }
+
+            return response()->json($body, $txResult['status']);
+        }
+
+        /** @var AssignmentSubmission $submission */
+        $submission = $txResult['submission'];
 
         return response()->json([
+            'success' => true,
             'message' => 'Assignment submitted successfully.',
             'data' => $submission->load(['assignment', 'student']),
         ], 201);
@@ -240,8 +334,35 @@ class AssignmentSubmissionController extends Controller
 
         $gradingStatus = $isPublished ? 'Published (Graded)' : 'Waiting for Teacher Grading';
 
+        $versionNumber = (int) ($s->version_number ?: 1);
+        $isLatest = (bool) ($s->is_latest ?? true);
+        $canResubmit = $assignment && $student
+            ? (bool) $this->reopenService->evaluateAssignmentAccess($assignment, $student)['can_resubmit']
+            : (! $isPublished && strtolower((string) ($assignment?->status ?? 'published')) !== 'closed');
+
+        $uploadedFiles = [];
+        if (! empty($fileMeta['has_file'])) {
+            $uploadedFiles[] = [
+                'file_name' => $fileMeta['file_name'],
+                'file_extension' => $fileMeta['file_extension'],
+                'file_type' => $fileMeta['file_type'],
+                'mime_type' => $fileMeta['mime_type'],
+                'file_size' => $fileMeta['file_size'],
+                'file_size_label' => $fileMeta['file_size_label'],
+                'preview_type' => $fileMeta['preview_type'],
+                'file_exists' => $fileMeta['file_exists'],
+                'view_url' => $fileMeta['view_url'],
+                'download_url' => $fileMeta['download_url'],
+            ];
+        }
+
+        $versionLabel = $versionNumber > 1
+            ? ('Version ' . $versionNumber . ($isLatest ? ' (Latest)' : ''))
+            : ($isLatest ? 'Latest Submission' : 'Version 1');
+
         return array_merge([
             'id' => $s->id,
+            'submission_id' => $s->id,
             'assignment_id' => $s->assignment_id,
             'student_id' => $s->student_id,
             'student_code' => $student?->student_code ?? ('STU' . $s->student_id),
@@ -259,12 +380,17 @@ class AssignmentSubmissionController extends Controller
             'submission_status' => $submissionStatus,
             'grading_status' => $gradingStatus,
             'is_published' => $isPublished,
+            'is_late' => (bool) ($s->is_late || $rawStatus === 'late'),
+            'is_latest' => $isLatest,
+            'version_number' => $versionNumber,
+            'uploaded_files' => $uploadedFiles,
+            'submission_text' => $s->submission_text,
             // Never leak unpublished draft scores or comments to students
             'score' => $isPublished ? (float) $s->score : null,
             'feedback' => $isPublished ? ($s->feedback ?? '') : '',
             'published_at' => $isPublished && $s->updated_at ? \Carbon\Carbon::parse($s->updated_at)->format('M d, Y h:i A') : null,
-            'can_resubmit' => ! $isPublished && strtolower((string) ($assignment?->status ?? 'published')) !== 'closed',
-            'version_label' => 'Latest Submission',
+            'can_resubmit' => $canResubmit,
+            'version_label' => $versionLabel,
         ], $fileMeta);
     }
 

@@ -13,12 +13,17 @@ use App\Models\LearningAnalytic;
 use App\Models\Notification;
 use App\Models\Prediction;
 use App\Models\Quiz;
+use App\Models\QuizAttempt;
+use App\Models\QuizQuestion;
 use App\Models\Recommendation;
 use App\Models\RiskAssessment;
 use App\Models\Student;
 use App\Models\Teacher;
 use App\Models\User;
 use App\Models\GpaRecord;
+use App\Services\QuizAvailabilityService;
+use App\Services\QuizGradingService;
+use App\Support\YearLevel;
 use Illuminate\Http\Request;
 
 class DashboardController extends Controller
@@ -143,8 +148,27 @@ class DashboardController extends Controller
         $chartData = [];
         $chartLabels = [];
         foreach ($allAnalytics as $analytic) {
-            $chartLabels[] = \Carbon\Carbon::parse($analytic->period_start)->format('M');
-            $chartData[] = $analytic->overall_performance ?? 0;
+            if ($analytic->overall_performance !== null) {
+                $chartLabels[] = \Carbon\Carbon::parse($analytic->period_start)->format('M');
+                $chartData[] = (float) $analytic->overall_performance;
+            }
+        }
+        $calculator = app(\App\Services\StudentAnalyticsCalculator::class);
+        if (empty($chartData)) {
+            $liveSeries = $calculator->buildTimeSeries(
+                $student,
+                'monthly',
+                $semesterId ? (int) $semesterId : null,
+                $courseId ? (int) $courseId : null
+            );
+            $validPoints = array_values(array_filter(
+                $liveSeries,
+                fn (array $pt) => $pt['overall_performance'] !== null
+            ));
+            foreach (array_slice($validPoints, -6) as $pt) {
+                $chartLabels[] = \Carbon\Carbon::parse($pt['period_start'])->format('M');
+                $chartData[] = (float) $pt['overall_performance'];
+            }
         }
 
         // Chart Data for Predictions
@@ -184,8 +208,8 @@ class DashboardController extends Controller
             ->whereIn('course_id', $enrolledCourseIds)
             ->with([
                 'course',
-                'submissions' => fn ($q) => $q->where('student_id', $student->id),
-                'attempts' => fn ($q) => $q->where('student_id', $student->id),
+                'submissions' => fn ($q) => $q->where('student_id', $student->id)->orderByDesc('version_number')->orderByDesc('submitted_at')->orderByDesc('id'),
+                'attempts' => fn ($q) => $q->where('student_id', $student->id)->orderByDesc('attempt_number')->orderByDesc('id'),
             ]);
         if ($semesterId) {
             $asnQuery->where('semester_id', $semesterId);
@@ -219,7 +243,7 @@ class DashboardController extends Controller
             ->whereIn('course_id', $enrolledCourseIds)
             ->with([
                 'course',
-                'attempts' => fn ($q) => $q->where('student_id', $student->id)->orderByDesc('attempt_number'),
+                'attempts' => fn ($q) => $q->where('student_id', $student->id)->orderByDesc('attempt_number')->orderByDesc('id'),
             ]);
         if ($semesterId) {
             $qzQuery->where('semester_id', $semesterId);
@@ -232,12 +256,14 @@ class DashboardController extends Controller
         $qzCompleted = 0;
         $qzEarned = 0.0;
         $qzMax = 0.0;
+        $gradingService = app(QuizGradingService::class);
         foreach ($studentQuizzes as $qz) {
-            $latestAtt = $qz->attempts->first();
-            if ($latestAtt && in_array($latestAtt->status, ['completed', 'timed_out'], true)) {
+            $activeAttempts = $qz->attempts->filter(fn ($a) => ! $a->is_reset && $a->status !== 'in_progress');
+            if ($activeAttempts->isNotEmpty()) {
                 $qzCompleted++;
-                if ($latestAtt->score !== null) {
-                    $qzEarned += (float) $latestAtt->score;
+                $effectiveScore = $gradingService->calculateStudentQuizScore($qz, $qz->attempts);
+                if ($effectiveScore !== null) {
+                    $qzEarned += $effectiveScore;
                     $qzMax += (float) ($qz->total_score ?: 100);
                 }
             }
@@ -274,27 +300,54 @@ class DashboardController extends Controller
         }
         $exAvg = $exMax > 0 ? round(($exEarned / $exMax) * 100, 2) : ($analytics?->exam_average !== null ? (float) $analytics->exam_average : null);
 
-        // GPA Summary across all semesters
+        // GPA Summary across all semesters (never fabricate credits from uncompleted enrollments)
         $allGpaRecords = GpaRecord::where('student_id', $student->id)->with('semester')->orderBy('semester_id')->get();
         $totalEarnedCredits = (float) $allGpaRecords->sum('earned_credits');
-        if ($totalEarnedCredits <= 0 && $enrollments->isNotEmpty()) {
-            $totalEarnedCredits = (float) $enrollments->sum(fn ($e) => (float) ($e->course?->credit ?? $e->course?->credits ?? 3.0));
+        if ($totalEarnedCredits <= 0) {
+            $completedCredits = (float) $enrollments
+                ->filter(fn ($e) => strtolower((string) $e->status) === 'completed')
+                ->sum(fn ($e) => (float) ($e->course?->credit ?? $e->course?->credits ?? 0));
+            if ($completedCredits <= 0) {
+                $completedCredits = (float) Grade::where('student_id', $student->id)
+                    ->whereIn('status', ['official', 'finalized', 'published'])
+                    ->where('letter_grade', '!=', 'F')
+                    ->whereNotNull('letter_grade')
+                    ->with('course')
+                    ->get()
+                    ->sum(fn ($g) => (float) ($g->course?->credit ?? $g->course?->credits ?? 0));
+            }
+            $totalEarnedCredits = $completedCredits;
         }
+        $effectiveAttendanceRate = $attPercentage ?? ($analytics?->attendance_rate !== null ? (float) $analytics->attendance_rate : null);
+        $overallPerformance = $analytics?->overall_performance !== null
+            ? (float) $analytics->overall_performance
+            : $calculator->averageNonNull([$effectiveAttendanceRate, $asnAvg, $qzAvg, $exAvg]);
         $weightedPoints = 0.0;
         $weightedCredits = 0.0;
         foreach ($allGpaRecords as $gr) {
-            $cr = (float) ($gr->earned_credits ?: 1.0);
+            $cr = (float) ($gr->earned_credits ?: $gr->total_credits ?: 1.0);
             $weightedPoints += ((float) $gr->gpa) * $cr;
             $weightedCredits += $cr;
         }
         $cumulativeGpa = $weightedCredits > 0
             ? round($weightedPoints / $weightedCredits, 2)
             : ($gpaRecord ? (float) $gpaRecord->gpa : null);
-        $semesterGpa = $gpaRecord ? (float) $gpaRecord->gpa : $cumulativeGpa;
+
+        $gpaCalc = app(\App\Services\GpaCalculationService::class);
+        $currentPeriodInfo = $gpaCalc->resolveCurrentPeriod($student);
+        $targetSemId = $semesterId ? (int) $semesterId : $currentPeriodInfo['semester_id'];
+        $liveSemSummary = $targetSemId ? $gpaCalc->calculateSemesterSummary($student, $targetSemId, $currentPeriodInfo['study_year']) : null;
+
+        $currentSemesterGpa = null;
+        if ($liveSemSummary && $liveSemSummary['is_complete'] && $liveSemSummary['semester_gpa'] !== null) {
+            $currentSemesterGpa = (float) $liveSemSummary['semester_gpa'];
+        } elseif ($gpaRecord && (! $liveSemSummary || $liveSemSummary['enrolled_count'] === 0)) {
+            $currentSemesterGpa = (float) $gpaRecord->gpa;
+        }
+
+        $semesterGpa = $currentSemesterGpa;
         $academicStanding = $gpaRecord?->academic_standing
-            ?? ($cumulativeGpa !== null
-                ? ($cumulativeGpa >= 3.5 ? "Dean's List" : ($cumulativeGpa >= 2.0 ? 'Good Standing' : 'Academic Probation'))
-                : null);
+            ?? \App\Services\GpaCalculationService::academicStanding($currentSemesterGpa ?? $cumulativeGpa);
 
         // Build unified recent_activities feed
         $recentActivities = [];
@@ -331,7 +384,7 @@ class DashboardController extends Controller
 
         foreach ($studentQuizzes as $qz) {
             $att = $qz->attempts->first();
-            if ($att && in_array($att->status, ['completed', 'timed_out'], true)) {
+            if ($att && in_array($att->status, ['completed', 'timed_out', 'submitted', 'graded'], true)) {
                 $ts = $att->submitted_at ?? $att->updated_at ?? $att->created_at;
                 $recentActivities[] = [
                     'id' => 'quiz_attempt_' . $att->id,
@@ -428,28 +481,42 @@ class DashboardController extends Controller
         usort($recentActivities, fn ($a, $b) => strcmp($b['timestamp'] ?? '', $a['timestamp'] ?? ''));
         $recentActivities = array_slice($recentActivities, 0, 20);
 
+        $student->load(['department', 'classRoom.academicYear', 'user', 'program', 'courseEnrollments.semester.academicYear']);
+        $student->setAttribute('academic_year', $student->resolveAcademicYearName());
+        $student->setAttribute('semester', $student->resolveSemesterName());
+
         return response()->json([
             'message' => 'Student dashboard retrieved successfully.',
             'data' => [
-                'student' => $student->load(['department', 'classRoom', 'user', 'program']),
+                'student' => $student,
                 'enrollments' => $enrollments,
                 'semesters' => $allSemesters,
                 'analytics' => $analytics,
+                'overall_performance' => $overallPerformance,
+                'attendance_rate' => $effectiveAttendanceRate,
+                'assignment_score' => $asnAvg,
+                'quiz_score' => $qzAvg,
+                'exam_score' => $exAvg,
                 'predictions' => $predictions,
                 'risk_assessment' => $riskAssessment,
                 'recommendations' => $recommendations,
                 'notifications' => $notifications,
                 'unread_notifications_count' => $unreadNotifCount,
                 'recent_grades' => $recentGrades,
-                'gpa' => $gpaRecord ? $gpaRecord->gpa : $cumulativeGpa,
+                'gpa' => $currentSemesterGpa,
                 'gpa_record' => $gpaRecord,
                 'gpa_records' => $allGpaRecords,
                 'gpa_summary' => [
+                    'current_semester_gpa' => $currentSemesterGpa,
                     'semester_gpa' => $semesterGpa,
+                    'semester_average' => $liveSemSummary['semester_average'] ?? null,
                     'cumulative_gpa' => $cumulativeGpa,
                     'completed_credits' => $totalEarnedCredits,
-                    'semester_credits' => $gpaRecord ? (float) $gpaRecord->earned_credits : $totalEarnedCredits,
+                    'semester_credits' => $liveSemSummary ? (float) $liveSemSummary['total_credits'] : ($gpaRecord ? (float) $gpaRecord->earned_credits : $totalEarnedCredits),
                     'academic_standing' => $academicStanding,
+                    'current_academic_year' => $currentPeriodInfo['academic_year_name'],
+                    'current_study_year' => $currentPeriodInfo['study_year'],
+                    'current_semester' => $currentPeriodInfo['semester_name'],
                 ],
                 'attendance_summary' => [
                     'total' => $attTotal,
@@ -457,7 +524,7 @@ class DashboardController extends Controller
                     'absent' => $attAbsent,
                     'late' => $attLate,
                     'excused' => $attExcused,
-                    'percentage' => $attPercentage ?? ($analytics?->attendance_rate !== null ? (float) $analytics->attendance_rate : 0),
+                    'percentage' => $effectiveAttendanceRate,
                 ],
                 'assignments_summary' => [
                     'total' => $asnTotal,
@@ -572,9 +639,13 @@ class DashboardController extends Controller
     {
         return $items->each(function ($item) {
             $o = $item->courseOffering;
+            $yl = YearLevel::parse($o?->study_year ?? $o?->classRoom?->year_level);
             $item->setAttribute('academic_context', [
                 'course_offering_id' => $item->course_offering_id,
                 'class_name' => $o?->classRoom?->name ?? $o?->section_name,
+                'year_level' => $yl,
+                'year_level_code' => YearLevel::code($yl),
+                'year_level_label' => YearLevel::label($yl),
                 'semester_name' => $o?->semester?->name ?? $item->semester?->name,
                 'academic_year_name' => $o?->semester?->academicYear?->name,
             ]);
@@ -598,7 +669,10 @@ class DashboardController extends Controller
             'course',
             'semester',
             'submissions' => function ($query) use ($student) {
-                $query->where('student_id', $student->id);
+                $query->where('student_id', $student->id)
+                    ->orderByDesc('version_number')
+                    ->orderByDesc('submitted_at')
+                    ->orderByDesc('id');
             },
             'attempts' => function ($query) use ($student) {
                 $query->where('student_id', $student->id)->orderByDesc('attempt_number');
@@ -617,9 +691,34 @@ class DashboardController extends Controller
 
         $assignments = $this->attachAcademicContext($query->with('courseOffering.classRoom', 'courseOffering.semester.academicYear')->orderBy('due_date')->get());
         $fileService = app(\App\Services\SubmissionFileService::class);
-        $assignments->each(function ($asn) use ($fileService) {
+        $reopenService = app(\App\Services\AssessmentReopenService::class);
+        $assignments->each(function ($asn) use ($fileService, $reopenService, $student) {
             if ($asn->relationLoaded('submissions')) {
                 $asn->submissions->each(fn ($sub) => $fileService->decorateStudentSubmissionModel($sub));
+            }
+            $perm = $reopenService->evaluateAssignmentAccess($asn, $student);
+            foreach ([
+                'original_deadline',
+                'extended_deadline',
+                'effective_deadline',
+                'student_submission_status',
+                'reopen_status',
+                'window_state',
+                'original_attempt_limit',
+                'additional_attempts',
+                'effective_attempt_limit',
+                'used_attempts',
+                'remaining_attempts',
+                'allow_submission',
+                'allow_late_submission',
+                'allow_resubmission',
+                'can_submit',
+                'can_resubmit',
+                'has_active_override',
+                'blocked_reason',
+                'override',
+            ] as $attr) {
+                $asn->setAttribute($attr, $perm[$attr]);
             }
         });
 
@@ -662,6 +761,57 @@ class DashboardController extends Controller
 
         $quizzes = $this->attachAcademicContext($query->with('courseOffering.classRoom', 'courseOffering.semester.academicYear')->orderBy('start_at')->get());
 
+        $availability = app(\App\Services\QuizAvailabilityService::class);
+        $grading = app(\App\Services\QuizGradingService::class);
+        $reopenService = app(\App\Services\AssessmentReopenService::class);
+
+        $quizzes->transform(function (\App\Models\Quiz $quiz) use ($student, $availability, $grading, $reopenService) {
+            $access = $availability->evaluateStudentAccess($quiz, $student);
+            $univPerm = $reopenService->evaluateQuizAccess($quiz, $student);
+            $attempts = $access['attempts'];
+            $hasPending = $access['active_attempts']->contains(fn (\App\Models\QuizAttempt $a) => $a->isPendingManualGrading());
+            $effectiveScore = $grading->calculateStudentQuizScore($quiz, $attempts);
+
+            // Mask score on attempts still awaiting manual Short Answer grading
+            $quiz->setRelation('attempts', $attempts->map(function (\App\Models\QuizAttempt $attempt) {
+                $clone = clone $attempt;
+                if ($attempt->isPendingManualGrading()) {
+                    $clone->setAttribute('score', null);
+                    $clone->setAttribute('auto_graded_score', null);
+                    $clone->setAttribute('manual_graded_score', null);
+                }
+
+                return $clone;
+            })->values());
+
+            $quiz->setAttribute('window_state', $access['window_state']);
+            $quiz->setAttribute('original_deadline', $univPerm['original_deadline']);
+            $quiz->setAttribute('extended_deadline', $univPerm['extended_deadline']);
+            $quiz->setAttribute('effective_end_at', $access['effective_end_at']?->toIso8601String());
+            $quiz->setAttribute('effective_deadline', $univPerm['effective_deadline']);
+            $quiz->setAttribute('reopen_status', $univPerm['reopen_status']);
+            $quiz->setAttribute('student_submission_status', $univPerm['student_submission_status']);
+            $quiz->setAttribute('original_attempt_limit', $univPerm['original_attempt_limit']);
+            $quiz->setAttribute('additional_attempts', $univPerm['additional_attempts']);
+            $quiz->setAttribute('max_attempts', $access['max_attempts']);
+            $quiz->setAttribute('attempts_used', $access['attempts_used']);
+            $quiz->setAttribute('attempts_remaining', $access['attempts_remaining']);
+            $quiz->setAttribute('scoring_method', $quiz->scoring_method ?: 'highest');
+            $quiz->setAttribute('allow_late_submission', $access['allow_late_submission']);
+            $quiz->setAttribute('allow_resubmission', $univPerm['allow_resubmission']);
+            $quiz->setAttribute('effective_score', ($hasPending && ($quiz->scoring_method === 'latest' || $effectiveScore === null)) ? null : $effectiveScore);
+            $quiz->setAttribute('has_pending_grading', $hasPending);
+            $quiz->setAttribute('can_start', $univPerm['can_start']);
+            $quiz->setAttribute('can_continue', $univPerm['can_continue']);
+            $quiz->setAttribute('can_submit', $univPerm['can_submit']);
+            $quiz->setAttribute('has_active_override', $univPerm['has_active_override']);
+            $quiz->setAttribute('blocked_reason', $univPerm['blocked_reason']);
+            $quiz->setAttribute('override', $univPerm['override']);
+            $quiz->setAttribute('score_released', ! $hasPending && $effectiveScore !== null);
+
+            return $quiz;
+        });
+
         return response()->json([
             'message' => 'Student quizzes retrieved successfully.',
             'data'    => $quizzes,
@@ -698,7 +848,26 @@ class DashboardController extends Controller
             $query->where('course_id', $courseId);
         }
 
-        $exams = $this->attachAcademicContext($query->with('courseOffering.classRoom', 'courseOffering.semester.academicYear')->orderBy('exam_date')->get());
+        $rawExams = $this->attachAcademicContext($query->with('courseOffering.classRoom', 'courseOffering.semester.academicYear')->orderBy('exam_date')->get());
+
+        $exams = $rawExams->map(function ($exam) {
+            $published = $exam->isResultsPublished();
+            $exam->is_published = $published;
+            $exam->display_status = $exam->displayStatus();
+            if (! $published) {
+                $exam->setRelation('results', collect());
+            } else {
+                $totalMarks = (float) ($exam->total_score ?: 100);
+                $exam->results->each(function ($res) use ($totalMarks) {
+                    if ($res->score !== null) {
+                        $scoreVal = (float) $res->score;
+                        $res->percentage = $totalMarks > 0 ? round(($scoreVal / $totalMarks) * 100, 1) : 0.0;
+                        $res->result_status = \App\Models\Exam::calculatePassStatus($scoreVal, $totalMarks);
+                    }
+                });
+            }
+            return $exam;
+        });
 
         return response()->json([
             'message' => 'Student exams retrieved successfully.',
@@ -720,6 +889,10 @@ class DashboardController extends Controller
         if ($request->filled('semester_id')) {
             $offeringsQuery->where('semester_id', (int) $request->query('semester_id'));
         }
+        $yearLevelFilter = YearLevel::parse($request->query('year_level', $request->query('study_year')));
+        if ($yearLevelFilter !== null) {
+            $offeringsQuery->where('study_year', $yearLevelFilter);
+        }
         if ($request->filled('course_id')) {
             $reqCourseId = (int) $request->query('course_id');
             if ($user?->role !== 'admin' && ! $authService->isCourseAuthorized($teacher, $reqCourseId)) {
@@ -731,6 +904,7 @@ class DashboardController extends Controller
         $offeringCourseIds = (clone $offeringsQuery)->pluck('course_id')->filter()->unique();
         $directCourseIds = Course::where('teacher_id', $teacher->id)
             ->when($request->filled('course_id'), fn ($q) => $q->where('id', (int) $request->query('course_id')))
+            ->when($yearLevelFilter !== null, fn ($q) => $q->forYearLevel($yearLevelFilter))
             ->pluck('id');
         $courseIds = $offeringCourseIds->merge($directCourseIds)->unique()->values();
 
@@ -747,7 +921,7 @@ class DashboardController extends Controller
         $highRiskStudents = RiskAssessment::whereIn('course_id', $courseIds)
             ->when($semesterFilter, fn ($q) => $q->where('semester_id', $semesterFilter))
             ->whereIn('risk_level', ['medium', 'high'])
-            ->with(['student.user', 'course'])
+            ->with(['student.user', 'student.classRoom.academicYear', 'course'])
             ->latest()
             ->take(10)
             ->get();
@@ -772,7 +946,8 @@ class DashboardController extends Controller
 
         $pendingScores = AssignmentSubmission::whereHas('assignment', fn ($q) => $q->whereIn('course_id', $courseIds)
                 ->when($semesterFilter, fn ($sq) => $sq->where('semester_id', $semesterFilter)))
-            ->whereIn('status', ['submitted', 'pending'])
+            ->where('is_latest', true)
+            ->whereIn('status', ['submitted', 'pending', 'late'])
             ->whereNull('score')
             ->count() + Attendance::whereIn('course_id', $courseIds)
                 ->when($semesterFilter, fn ($sq) => $sq->where('semester_id', $semesterFilter))
@@ -786,10 +961,12 @@ class DashboardController extends Controller
             ->whereIn('risk_level', ['medium', 'high'])
             ->distinct('student_id')->count('student_id');
 
-        // Real monthly performance trend from assignment submissions / exam results
-        $monthlyRows = AssignmentSubmission::join('assignments', 'assignment_submissions.assignment_id', '=', 'assignments.id')
+        // Real monthly performance trend combining scored assignments, deduplicated quizzes, and exams
+        $trendPoints = collect();
+        $monthlyAssignmentRows = AssignmentSubmission::join('assignments', 'assignment_submissions.assignment_id', '=', 'assignments.id')
             ->whereIn('assignments.course_id', $courseIds)
             ->when($semesterFilter, fn ($q) => $q->where('assignments.semester_id', $semesterFilter))
+            ->where('assignment_submissions.is_latest', true)
             ->whereNotNull('assignment_submissions.score')
             ->where('assignments.total_score', '>', 0)
             ->select(
@@ -799,27 +976,129 @@ class DashboardController extends Controller
                 'assignments.total_score'
             )
             ->get();
-
-        $groupedMonths = $monthlyRows->groupBy(function ($r) {
+        foreach ($monthlyAssignmentRows as $r) {
             $dt = $r->submitted_at ?? $r->due_date;
-            return $dt ? \Carbon\Carbon::parse($dt)->format('Y-m') : 'Unknown';
-        })->forget('Unknown')->sortKeys()->take(-6);
+            if ($dt) {
+                $trendPoints->push([
+                    'ym' => \Carbon\Carbon::parse($dt)->format('Y-m'),
+                    'pct' => ((float) $r->score / (float) $r->total_score) * 100.0,
+                ]);
+            }
+        }
+
+        $monthlyQuizRows = \App\Models\QuizAttempt::join('quizzes', 'quiz_attempts.quiz_id', '=', 'quizzes.id')
+            ->whereIn('quizzes.course_id', $courseIds)
+            ->whereNull('quizzes.deleted_at')
+            ->when($semesterFilter, fn ($q) => $q->where('quizzes.semester_id', $semesterFilter))
+            ->where('quiz_attempts.is_reset', false)
+            ->whereNotNull('quiz_attempts.score')
+            ->whereIn('quiz_attempts.status', ['completed', 'graded', 'timed_out'])
+            ->where(function ($q) {
+                $q->whereNull('quiz_attempts.grading_status')
+                    ->orWhere('quiz_attempts.grading_status', '!=', 'pending_grading');
+            })
+            ->where('quizzes.total_score', '>', 0)
+            ->orderByDesc('quiz_attempts.attempt_number')
+            ->orderByDesc('quiz_attempts.id')
+            ->select(
+                'quiz_attempts.quiz_id',
+                'quiz_attempts.student_id',
+                'quiz_attempts.submitted_at',
+                'quizzes.start_at',
+                'quiz_attempts.score',
+                'quizzes.total_score',
+                'quizzes.scoring_method'
+            )
+            ->get()
+            ->groupBy(fn ($r) => $r->quiz_id . ':' . $r->student_id)
+            ->map(function ($group) {
+                $latest = $group->first();
+                $method = strtolower((string) ($latest->scoring_method ?: 'highest'));
+                $score = match ($method) {
+                    'latest' => (float) $latest->score,
+                    'average' => round((float) $group->avg(fn ($r) => (float) $r->score), 2),
+                    default => (float) $group->max(fn ($r) => (float) $r->score),
+                };
+                $latest->score = $score;
+
+                return $latest;
+            })
+            ->values();
+        foreach ($monthlyQuizRows as $r) {
+            $dt = $r->submitted_at ?? $r->start_at;
+            if ($dt) {
+                $trendPoints->push([
+                    'ym' => \Carbon\Carbon::parse($dt)->format('Y-m'),
+                    'pct' => ((float) $r->score / (float) $r->total_score) * 100.0,
+                ]);
+            }
+        }
+
+        $monthlyExamRows = \App\Models\ExamResult::join('exams', 'exam_results.exam_id', '=', 'exams.id')
+            ->whereIn('exams.course_id', $courseIds)
+            ->when($semesterFilter, fn ($q) => $q->where('exams.semester_id', $semesterFilter))
+            ->whereNotNull('exam_results.score')
+            ->where('exams.total_score', '>', 0)
+            ->select('exams.exam_date', 'exam_results.created_at', 'exam_results.score', 'exams.total_score')
+            ->get();
+        foreach ($monthlyExamRows as $r) {
+            $dt = $r->exam_date ?? $r->created_at;
+            if ($dt) {
+                $trendPoints->push([
+                    'ym' => \Carbon\Carbon::parse($dt)->format('Y-m'),
+                    'pct' => ((float) $r->score / (float) $r->total_score) * 100.0,
+                ]);
+            }
+        }
+
+        $groupedMonths = $trendPoints->groupBy('ym')->sortKeys()->take(-6);
 
         $trendLabels = [];
         $trendData = [];
         $targetTrendData = [];
         foreach ($groupedMonths as $ym => $rows) {
             $trendLabels[] = \Carbon\Carbon::createFromFormat('Y-m', $ym)->format('M');
-            $pct = $rows->avg(fn ($r) => ((float) $r->score / (float) $r->total_score) * 100.0);
-            $trendData[] = round((float) $pct, 1);
+            $trendData[] = round((float) $rows->avg('pct'), 1);
             $targetTrendData[] = 75.0;
         }
+
+        $teacherSemesters = $authService->getAuthorizedOfferingsQuery($teacher)
+            ->with('semester')
+            ->get()
+            ->pluck('semester')
+            ->filter()
+            ->unique('id')
+            ->values()
+            ->map(fn ($s) => ['id' => $s->id, 'name' => $s->name]);
+        if ($teacherSemesters->isEmpty()) {
+            $teacherSemesters = \App\Models\Semester::orderByDesc('id')->get(['id', 'name']);
+        }
+
+        $enrolledStudents = Student::whereHas('courseEnrollments', fn ($q) => $q->whereIn('course_id', $courseIds)
+            ->when($semesterFilter, fn ($sq) => $sq->where('semester_id', $semesterFilter)))
+            ->get(['id', 'year_level']);
+        $ylCounts = array_fill(1, YearLevel::maxLevel(), 0);
+        foreach ($enrolledStudents as $st) {
+            $yl = YearLevel::parse($st->year_level);
+            if ($yl !== null && isset($ylCounts[$yl])) {
+                $ylCounts[$yl]++;
+            }
+        }
+        $yearLevelBreakdown = array_map(fn (array $opt) => [
+            'year_level' => $opt['number'],
+            'code' => $opt['code'],
+            'name' => $opt['name'],
+            'label' => $opt['label'],
+            'students_count' => $ylCounts[$opt['number']] ?? 0,
+        ], YearLevel::options());
 
         return response()->json([
             'message' => 'Teacher dashboard retrieved successfully.',
             'data' => [
                 'teacher' => $teacher->load(['department', 'user']),
                 'courses' => $courses,
+                'semesters' => $teacherSemesters,
+                'year_level_breakdown' => $yearLevelBreakdown,
                 'total_students' => $totalEnrolled,
                 'my_courses' => $courses->count(),
                 'at_risk_students' => $highRiskStudents,
@@ -993,10 +1272,34 @@ class DashboardController extends Controller
     {
         $dbStart = microtime(true);
         $dbConnected = false;
+        $dbEngine = strtoupper((string) \Illuminate\Support\Facades\DB::getDriverName());
+        $dbName = (string) \Illuminate\Support\Facades\DB::connection()->getDatabaseName();
+        $tableCount = 0;
+        $totalRecords = 0;
+        $sizeMb = 0.0;
         try {
             \Illuminate\Support\Facades\DB::connection()->getPdo();
             \Illuminate\Support\Facades\DB::select('SELECT 1');
             $dbConnected = true;
+            if (\Illuminate\Support\Facades\DB::getDriverName() === 'mysql') {
+                $verRow = \Illuminate\Support\Facades\DB::selectOne('SELECT VERSION() as v');
+                if ($verRow && isset($verRow->v)) {
+                    $dbEngine = 'MySQL ' . $verRow->v;
+                }
+                $statsRow = \Illuminate\Support\Facades\DB::selectOne(
+                    'SELECT COUNT(*) as tbl_count, COALESCE(SUM(TABLE_ROWS), 0) as total_rows, ROUND(COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0) / 1024 / 1024, 2) as size_mb FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?',
+                    [$dbName]
+                );
+                if ($statsRow) {
+                    $tableCount = (int) ($statsRow->tbl_count ?? 0);
+                    $totalRecords = (int) ($statsRow->total_rows ?? 0);
+                    $sizeMb = (float) ($statsRow->size_mb ?? 0.0);
+                }
+            } elseif (\Illuminate\Support\Facades\DB::getDriverName() === 'sqlite') {
+                $tblRow = \Illuminate\Support\Facades\DB::selectOne("SELECT COUNT(*) as tbl_count FROM sqlite_master WHERE type='table'");
+                $tableCount = (int) ($tblRow->tbl_count ?? 0);
+                $dbEngine = 'SQLite';
+            }
         } catch (\Exception $e) {
             $dbConnected = false;
         }
@@ -1024,7 +1327,13 @@ class DashboardController extends Controller
                     'name' => 'Database',
                     'status' => $dbConnected ? 'online' : 'offline',
                     'latency_ms' => $dbLatency,
-                    'message' => $dbConnected ? 'Connected (MySQL)' : 'Connection Failed',
+                    'message' => $dbConnected ? 'Connected (' . $dbEngine . ')' : 'Connection Failed',
+                    'engine' => $dbEngine,
+                    'database_name' => $dbName,
+                    'table_count' => $tableCount,
+                    'total_records' => $totalRecords,
+                    'size_mb' => $sizeMb,
+                    'backup_supported_via_api' => false,
                 ],
                 'ml_service' => [
                     'name' => 'ML Service',
@@ -1040,17 +1349,32 @@ class DashboardController extends Controller
     {
         $semesterId = $request->query('semester_id');
         $academicYearId = $request->query('academic_year_id');
+        $yearLevelFilter = $request->query('year_level');
+        $ylParsed = ($yearLevelFilter && strtolower((string) $yearLevelFilter) !== 'all')
+            ? YearLevel::parse($yearLevelFilter)
+            : null;
+        $invalidYl = ($yearLevelFilter && strtolower((string) $yearLevelFilter) !== 'all' && $ylParsed === null);
 
-        $totalStudents = Student::count();
+        $studentQuery = Student::query();
+        if ($invalidYl) {
+            $studentQuery->whereRaw('1 = 0');
+        } elseif ($ylParsed !== null) {
+            $studentQuery->forYearLevel($ylParsed);
+        }
+
+        $totalStudents = $studentQuery->count();
         $totalTeachers = Teacher::count();
         $totalCourses = Course::count();
-        $totalPredictions = Prediction::when($semesterId, fn ($q) => $q->where('semester_id', $semesterId))->count();
+        $totalPredictions = Prediction::when($semesterId, fn ($q) => $q->where('semester_id', $semesterId))
+            ->when($ylParsed !== null, fn ($q) => $q->whereHas('student', fn ($sq) => $sq->forYearLevel($ylParsed)))
+            ->count();
         $totalDepartments = Department::count();
-        $totalClasses = \App\Models\ClassRoom::count();
+        $totalClasses = \App\Models\ClassRoom::when($ylParsed !== null, fn ($q) => $q->forYearLevel($ylParsed))->count();
 
         // Latest risk assessment per student (avoids duplicate historical counting)
         $latestRiskIds = RiskAssessment::selectRaw('MAX(id) as id')
             ->when($semesterId, fn ($q) => $q->where('semester_id', $semesterId))
+            ->when($ylParsed !== null, fn ($q) => $q->whereHas('student', fn ($sq) => $sq->forYearLevel($ylParsed)))
             ->groupBy('student_id')
             ->pluck('id');
 
@@ -1079,6 +1403,9 @@ class DashboardController extends Controller
             $gradesQuery->where('semester_id', $semesterId);
         } elseif ($academicYearId) {
             $gradesQuery->whereHas('semester', fn ($q) => $q->where('academic_year_id', $academicYearId));
+        }
+        if ($ylParsed !== null) {
+            $gradesQuery->whereHas('student', fn ($sq) => $sq->forYearLevel($ylParsed));
         }
         $grades = $gradesQuery->select('letter_grade', 'total_score')->get();
 
@@ -1109,6 +1436,24 @@ class DashboardController extends Controller
             $gradePercentages[$k] = $totalGrades > 0 ? round(($count / $totalGrades) * 100, 1) : 0.0;
         }
 
+        $ylCounts = array_fill(1, YearLevel::maxLevel(), 0);
+        $unassignedYl = 0;
+        foreach (Student::get(['id', 'year_level']) as $st) {
+            $lvl = YearLevel::parse($st->year_level);
+            if ($lvl !== null && isset($ylCounts[$lvl])) {
+                $ylCounts[$lvl]++;
+            } else {
+                $unassignedYl++;
+            }
+        }
+        $yearLevelBreakdown = array_map(fn (array $opt) => [
+            'year_level' => $opt['number'],
+            'code' => $opt['code'],
+            'name' => $opt['name'],
+            'label' => $opt['label'],
+            'students_count' => $ylCounts[$opt['number']] ?? 0,
+        ], YearLevel::options());
+
         return response()->json([
             'message' => 'Detailed dashboard statistics retrieved successfully.',
             'data' => [
@@ -1118,6 +1463,8 @@ class DashboardController extends Controller
                 'total_predictions' => $totalPredictions,
                 'total_departments' => $totalDepartments,
                 'total_classes' => $totalClasses,
+                'unassigned_year_level_students' => $unassignedYl,
+                'year_level_breakdown' => $yearLevelBreakdown,
                 'risk_distribution' => $riskDistribution,
                 'grade_distribution' => $gradePercentages,
                 'grade_counts' => $gradeCounts,

@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\ClassRoom;
 use App\Models\Department;
+use App\Support\YearLevel;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -63,16 +64,18 @@ class AcademicProfileResolver
      */
     public function findClassId(?int $departmentId, ?string $academicYear, int|string|null $yearLevel): ?int
     {
-        $level = (int) preg_replace('/\D/', '', (string) $yearLevel);
+        $level = YearLevel::parse($yearLevel);
 
-        if (! $departmentId || blank($academicYear) || $level < 1) {
+        if (! $departmentId || blank($academicYear) || $level === null) {
             return null;
         }
+
+        $normalizedAy = str_replace('–', '-', trim($academicYear));
 
         return ClassRoom::query()
             ->where('department_id', $departmentId)
             ->where('year_level', $level)
-            ->whereHas('academicYear', fn ($query) => $query->where('name', trim($academicYear)))
+            ->whereHas('academicYear', fn ($query) => $query->where('name', $normalizedAy))
             ->value('id');
     }
 }

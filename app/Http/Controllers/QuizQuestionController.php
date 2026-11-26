@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\QuizQuestion;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 
 class QuizQuestionController extends Controller
 {
@@ -25,17 +26,20 @@ class QuizQuestionController extends Controller
 
     public function store(Request $request)
     {
+        $type = $request->input('question_type', 'multiple_choice');
         $validated = $request->validate([
             'quiz_id' => 'required|integer|exists:quizzes,id',
             'question_text' => 'required|string',
-            'question_type' => 'nullable|string|in:multiple_choice,true_false,essay',
+            'question_type' => 'nullable|string|in:multiple_choice,mcq,true_false,short_answer,essay',
             'marks' => 'required|numeric|min:0',
+            'is_required' => 'nullable|boolean',
             'question_order' => 'nullable|integer|min:1',
             'option_a' => 'nullable|string',
             'option_b' => 'nullable|string',
             'option_c' => 'nullable|string',
             'option_d' => 'nullable|string',
-            'correct_answer' => 'required|string',
+            'correct_answer' => [Rule::requiredIf(! in_array($type, ['short_answer', 'essay'], true)), 'nullable', 'string'],
+            'grading_guidance' => 'nullable|string',
         ]);
 
         $question = QuizQuestion::create([
@@ -43,12 +47,14 @@ class QuizQuestionController extends Controller
             'question_text' => $validated['question_text'],
             'question_type' => $validated['question_type'] ?? 'multiple_choice',
             'marks' => $validated['marks'],
-            'question_order' => $validated['question_order'] ?? 1,
+            'is_required' => array_key_exists('is_required', $validated) ? (bool) $validated['is_required'] : true,
+            'question_order' => $validated['question_order'] ?? ((int) QuizQuestion::where('quiz_id', $validated['quiz_id'])->max('question_order') + 1),
             'option_a' => $validated['option_a'] ?? null,
             'option_b' => $validated['option_b'] ?? null,
             'option_c' => $validated['option_c'] ?? null,
             'option_d' => $validated['option_d'] ?? null,
-            'correct_answer' => $validated['correct_answer'],
+            'correct_answer' => $validated['correct_answer'] ?? null,
+            'grading_guidance' => $validated['grading_guidance'] ?? ($validated['correct_answer'] ?? null),
         ]);
 
         return response()->json([
@@ -67,16 +73,19 @@ class QuizQuestionController extends Controller
 
     public function update(Request $request, QuizQuestion $quizQuestion)
     {
+        $type = $request->input('question_type', $quizQuestion->question_type);
         $validated = $request->validate([
             'question_text' => 'required|string',
-            'question_type' => 'nullable|string|in:multiple_choice,true_false,essay',
+            'question_type' => 'nullable|string|in:multiple_choice,mcq,true_false,short_answer,essay',
             'marks' => 'required|numeric|min:0',
+            'is_required' => 'nullable|boolean',
             'question_order' => 'nullable|integer|min:1',
             'option_a' => 'nullable|string',
             'option_b' => 'nullable|string',
             'option_c' => 'nullable|string',
             'option_d' => 'nullable|string',
-            'correct_answer' => 'required|string',
+            'correct_answer' => [Rule::requiredIf(! in_array($type, ['short_answer', 'essay'], true)), 'nullable', 'string'],
+            'grading_guidance' => 'nullable|string',
         ]);
 
         $quizQuestion->update($validated);
@@ -89,7 +98,11 @@ class QuizQuestionController extends Controller
 
     public function destroy(QuizQuestion $quizQuestion)
     {
-        $quizQuestion->delete();
+        if ($quizQuestion->answers()->exists()) {
+            $quizQuestion->delete();
+        } else {
+            $quizQuestion->forceDelete();
+        }
 
         return response()->json([
             'message' => 'Quiz question deleted successfully.',

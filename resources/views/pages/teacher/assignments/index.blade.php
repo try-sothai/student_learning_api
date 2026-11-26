@@ -56,6 +56,75 @@
     @if($managementRows->hasPages())<div class="px-4 pb-3">{{ $managementRows->links('pagination::bootstrap-5') }}</div>@endif
 </div>
 
+@if($isQuizPage)
+@php($modernQuizRows = $modernQuizzes ?? collect())
+<div class="card portal-card border-0 mt-4">
+    <div class="card-body p-4 pb-3 d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <div>
+            <h2 class="h5 fw-bold mb-1">Course Quizzes — Universal Reopen &amp; Override Management</h2>
+            <p class="text-muted small mb-0">Manage student quiz permissions, deadline extensions, extra attempts, attempt history, and audit logs.</p>
+        </div>
+        <span class="badge bg-primary-subtle text-primary">{{ number_format($modernQuizRows->count()) }} course quiz{{ $modernQuizRows->count() === 1 ? '' : 'zes' }}</span>
+    </div>
+    <div class="table-responsive">
+        <table class="table portal-table align-middle mb-0">
+            <thead>
+                <tr>
+                    <th class="ps-4">Quiz</th>
+                    <th>Course</th>
+                    <th>Availability &amp; Deadline</th>
+                    <th>Policy</th>
+                    <th>Status</th>
+                    <th>Overrides</th>
+                    <th class="text-end pe-4">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                @forelse($modernQuizRows as $mq)
+                    <tr>
+                        <td class="ps-4">
+                            <div class="fw-semibold">{{ $mq->title }}</div>
+                            <div class="small text-muted">
+                                {{ $mq->courseOffering?->classRoom?->name ?? $mq->courseOffering?->section_name ?? 'Course Offering' }}
+                                @if($mq->semester?->name) • {{ $mq->semester->name }} @endif
+                            </div>
+                        </td>
+                        <td>{{ $mq->course?->code ?? $mq->course?->name ?? 'Course' }}</td>
+                        <td class="small">
+                            <div>{{ $mq->start_at?->format('M d, Y H:i') ?? 'Open' }} – {{ $mq->end_at?->format('M d, Y H:i') ?? 'No deadline' }}</div>
+                            @if($mq->reopened_until)
+                                <span class="badge bg-info-subtle text-info mt-1">Reopened until {{ $mq->reopened_until->format('M d, Y H:i') }}</span>
+                            @endif
+                        </td>
+                        <td class="small">
+                            <div>Max: {{ $mq->max_attempts ? $mq->max_attempts . ' attempts' : 'Unlimited' }} • {{ ucfirst($mq->scoring_method ?: 'highest') }}</div>
+                            <div class="text-muted">{{ (int) ($mq->questions_count ?? 0) }} Qs • {{ (int) ($mq->attempts_count ?? 0) }} attempts @if($mq->allow_late_submission) • Late allowed @endif</div>
+                        </td>
+                        <td>
+                            @php($mqStatus = strtolower((string) $mq->status))
+                            <span class="badge {{ $mqStatus === 'published' || $mqStatus === 'open' ? 'bg-success-subtle text-success' : ($mqStatus === 'closed' ? 'bg-secondary-subtle text-secondary' : 'bg-warning-subtle text-warning') }}">{{ ucfirst($mq->status) }}</span>
+                        </td>
+                        <td>
+                            @php($ovCount = (int) ($mq->active_overrides_count ?? 0))
+                            <span class="badge {{ $ovCount > 0 ? 'bg-primary-subtle text-primary' : 'bg-light text-muted border' }}">{{ $ovCount }} active</span>
+                        </td>
+                        <td class="text-end pe-4">
+                            <div class="d-inline-flex gap-1">
+                                <a class="btn btn-sm btn-primary" href="{{ route('teacher.quizzes.manage', ['quiz' => $mq->id, 'tab' => 'students']) }}">Manage Access</a>
+                                <a class="btn btn-sm btn-outline-secondary" href="{{ route('teacher.quizzes.manage', ['quiz' => $mq->id, 'tab' => 'attempts']) }}">Attempts</a>
+                                <a class="btn btn-sm btn-outline-secondary" href="{{ route('teacher.quizzes.manage', ['quiz' => $mq->id, 'tab' => 'audit-logs']) }}">Audit Logs</a>
+                            </div>
+                        </td>
+                    </tr>
+                @empty
+                    <tr><td colspan="7" class="text-center text-muted py-4">No course offering quizzes found yet.</td></tr>
+                @endforelse
+            </tbody>
+        </table>
+    </div>
+</div>
+@endif
+
 <div class="modal fade" id="createTeacherAssignment" tabindex="-1" aria-labelledby="createTeacherAssignmentLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered">
         <form class="modal-content border-0 rounded-4" method="POST" action="{{ route('teacher.assignments.store') }}">

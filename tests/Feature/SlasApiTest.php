@@ -24,7 +24,10 @@ class SlasApiTest extends TestCase
 
     public function test_can_retrieve_departments_list(): void
     {
-        $response = $this->getJson('/api/departments');
+        $this->getJson('/api/departments')->assertStatus(401);
+
+        $admin = User::where('role', 'admin')->first();
+        $response = $this->actingAs($admin)->getJson('/api/departments');
 
         $response->assertOk()
             ->assertJsonPath('message', 'Departments retrieved successfully.')
@@ -33,7 +36,13 @@ class SlasApiTest extends TestCase
 
     public function test_can_create_new_department(): void
     {
-        $response = $this->postJson('/api/departments', [
+        $this->postJson('/api/departments', [
+            'name' => 'Cybersecurity & Infrastructure',
+            'code' => 'CYBER',
+        ])->assertStatus(401);
+
+        $admin = User::where('role', 'admin')->first();
+        $response = $this->actingAs($admin)->postJson('/api/departments', [
             'name' => 'Cybersecurity & Infrastructure',
             'code' => 'CYBER',
             'description' => 'Cybersecurity department',
@@ -46,16 +55,23 @@ class SlasApiTest extends TestCase
 
     public function test_can_retrieve_academic_years_and_semesters(): void
     {
-        $responseYears = $this->getJson('/api/academic-years');
+        $this->getJson('/api/academic-years')->assertStatus(401);
+        $this->getJson('/api/semesters')->assertStatus(401);
+
+        $admin = User::where('role', 'admin')->first();
+        $responseYears = $this->actingAs($admin)->getJson('/api/academic-years');
         $responseYears->assertOk();
 
-        $responseSemesters = $this->getJson('/api/semesters');
+        $responseSemesters = $this->actingAs($admin)->getJson('/api/semesters');
         $responseSemesters->assertOk();
     }
 
     public function test_can_retrieve_courses_list(): void
     {
-        $response = $this->getJson('/api/courses');
+        $this->getJson('/api/courses')->assertStatus(401);
+
+        $admin = User::where('role', 'admin')->first();
+        $response = $this->actingAs($admin)->getJson('/api/courses');
 
         $response->assertOk()
             ->assertJsonPath('message', 'Courses retrieved successfully.');
@@ -63,7 +79,10 @@ class SlasApiTest extends TestCase
 
     public function test_can_retrieve_students_list(): void
     {
-        $response = $this->getJson('/api/students');
+        $this->getJson('/api/students')->assertStatus(401);
+
+        $admin = User::where('role', 'admin')->first();
+        $response = $this->actingAs($admin)->getJson('/api/students');
 
         $response->assertOk()
             ->assertJsonPath('message', 'Students retrieved successfully.');
@@ -71,7 +90,10 @@ class SlasApiTest extends TestCase
 
     public function test_can_retrieve_teachers_list(): void
     {
-        $response = $this->getJson('/api/teachers');
+        $this->getJson('/api/teachers')->assertStatus(401);
+
+        $admin = User::where('role', 'admin')->first();
+        $response = $this->actingAs($admin)->getJson('/api/teachers');
 
         $response->assertOk()
             ->assertJsonPath('message', 'Teachers retrieved successfully.');

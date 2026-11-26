@@ -69,11 +69,11 @@ class AcademicStructureSeeder extends Seeder
             }
         }
 
-        // Year 1-3 classes of every department for the active academic year.
+        // Year 1-4 classes of every department for the active academic year.
         $active = AcademicYear::where('name', '2026-2027')->firstOrFail();
 
         foreach (Department::all() as $department) {
-            foreach ([1, 2, 3] as $level) {
+            foreach ([1, 2, 3, 4] as $level) {
                 ClassRoom::updateOrCreate(
                     ['code' => "{$department->code}-Y{$level}-{$active->name}"],
                     [

@@ -75,6 +75,37 @@ class TeacherAuthorizationService
     }
 
     /**
+     * Return array of all authorized student IDs for a teacher.
+     *
+     * @return array<int>
+     */
+    public function getAuthorizedStudentIds(Teacher $teacher): array
+    {
+        $offeringIds = $this->getAuthorizedOfferingIds($teacher);
+        $courseIds = $this->getAuthorizedCourseIds($teacher);
+
+        if (empty($offeringIds) && empty($courseIds)) {
+            return [];
+        }
+
+        return \App\Models\CourseEnrollment::query()
+            ->where(function (Builder $q) use ($offeringIds, $courseIds) {
+                if (! empty($offeringIds)) {
+                    $q->orWhereIn('course_offering_id', $offeringIds);
+                }
+                if (! empty($courseIds)) {
+                    $q->orWhereIn('course_id', $courseIds);
+                }
+            })
+            ->pluck('student_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    /**
      * Check if a student is enrolled in any of the teacher's authorized offerings or courses.
      */
     public function isStudentAuthorized(Teacher $teacher, int $studentId): bool

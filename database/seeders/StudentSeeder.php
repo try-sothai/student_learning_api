@@ -2,6 +2,8 @@
 
 namespace Database\Seeders;
 
+use App\Models\ClassRoom;
+use App\Models\Department;
 use App\Models\Student;
 use App\Models\User;
 use Illuminate\Database\Seeder;
@@ -17,31 +19,39 @@ class StudentSeeder extends Seeder
     public function run(): void
     {
         $departments = [
-            'Computer Science' => ['Software Engineering', 'Information Technology', 'Data Science'],
-            'Business Administration' => ['Marketing', 'Finance', 'Human Resources'],
-            'Engineering' => ['Civil Engineering', 'Electrical Engineering', 'Mechanical Engineering'],
-            'Tourism and Hospitality' => ['Hotel Management', 'Tour Guiding'],
+            'CS' => ['name' => 'Computer Science', 'majors' => ['Software Engineering', 'Information Technology', 'Data Science']],
+            'BA' => ['name' => 'Business Administration', 'majors' => ['Marketing', 'Finance', 'Human Resources']],
+            'IT' => ['name' => 'Information Technology', 'majors' => ['Network Administration', 'Cybersecurity']],
         ];
 
-        $yearLevels = ['Year 1', 'Year 2', 'Year 3', 'Year 4'];
-        $semesters = ['Semester 1', 'Semester 2'];
+        $yearLevels = ['1', '2', '3', '4'];
         $statuses = ['enrolled', 'enrolled', 'enrolled', 'enrolled', 'graduated', 'suspended'];
         $password = Hash::make('12345678');
 
+        $departmentIds = Department::pluck('id', 'code');
+        $classesByDeptYear = ClassRoom::query()
+            ->whereNotNull('department_id')
+            ->whereNotNull('year_level')
+            ->get()
+            ->groupBy(fn (ClassRoom $c) => $c->department_id . ':' . $c->year_level);
+
         // Continue numbering after the highest existing STD number (e.g. STD001 -> starts at STD002).
         $lastNumber = (int) Student::query()
-            ->selectRaw("MAX(CAST(SUBSTRING(student_id, 4) AS UNSIGNED)) as max_num")
+            ->selectRaw("MAX(CAST(SUBSTRING(student_code, 4) AS UNSIGNED)) as max_num")
             ->value('max_num');
 
-        DB::transaction(function () use ($departments, $yearLevels, $semesters, $statuses, $password, $lastNumber) {
+        DB::transaction(function () use ($departments, $yearLevels, $statuses, $password, $lastNumber, $departmentIds, $classesByDeptYear) {
             for ($i = 1; $i <= 300; $i++) {
                 $number = $lastNumber + $i;
                 $studentId = 'STD' . str_pad((string) $number, 3, '0', STR_PAD_LEFT);
 
                 $firstName = fake()->firstName();
                 $lastName = fake()->lastName();
-                $department = fake()->randomElement(array_keys($departments));
-                $major = fake()->randomElement($departments[$department]);
+                $deptCode = fake()->randomElement(array_keys($departments));
+                $deptId = $departmentIds[$deptCode] ?? null;
+                $major = fake()->randomElement($departments[$deptCode]['majors']);
+                $yearLevel = fake()->randomElement($yearLevels);
+                $classRoom = $deptId ? $classesByDeptYear->get($deptId . ':' . $yearLevel)?->first() : null;
 
                 $user = User::create([
                     'name' => "{$firstName} {$lastName}",
@@ -52,7 +62,7 @@ class StudentSeeder extends Seeder
 
                 Student::create([
                     'user_id' => $user->id,
-                    'student_id' => $studentId,
+                    'student_code' => $studentId,
                     'first_name' => $firstName,
                     'last_name' => $lastName,
                     'date_of_birth' => fake()->dateTimeBetween('-26 years', '-18 years')->format('Y-m-d'),
@@ -60,11 +70,10 @@ class StudentSeeder extends Seeder
                     'nationality' => 'Cambodian',
                     'phone' => fake()->numerify('0##-###-###'),
                     'address' => fake()->city() . ', Cambodia',
-                    'department' => $department,
+                    'department_id' => $deptId,
+                    'class_id' => $classRoom?->id,
                     'major' => $major,
-                    'academic_year' => '2026-2027',
-                    'year_level' => fake()->randomElement($yearLevels),
-                    'semester' => fake()->randomElement($semesters),
+                    'year_level' => $yearLevel,
                     'enrollment_date' => fake()->dateTimeBetween('-4 years', 'now')->format('Y-m-d'),
                     'status' => fake()->randomElement($statuses),
                 ]);

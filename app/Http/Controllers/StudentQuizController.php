@@ -8,16 +8,16 @@ use App\Models\QuizAttempt;
 use App\Models\QuizQuestion;
 use App\Models\Student;
 use App\Services\AssessmentAccessService;
+use App\Services\QuizAvailabilityService;
 use App\Services\QuizGradingService;
-use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Student quiz flow. One quiz = one attempt row = N answer rows.
- * Identity comes from the auth token only; ids in the URL/body are verified, never trusted.
- * Correct answers are only ever returned by review(), once the quiz is closed.
+ * Student quiz workflow.
+ * Identity comes strictly from the authenticated user's token; attempt limits,
+ * deadlines, overrides, incomplete-submission blocking, and grading run server-side.
  */
 class StudentQuizController extends Controller
 {
@@ -26,6 +26,7 @@ class StudentQuizController extends Controller
     public function __construct(
         protected AssessmentAccessService $access,
         protected QuizGradingService $grading,
+        protected QuizAvailabilityService $availability,
     ) {}
 
     protected function student(Request $request): Student
@@ -38,12 +39,29 @@ class StudentQuizController extends Controller
         return $student;
     }
 
-    /** Quiz that this student is allowed to open, or a 403/404 response. */
+    protected function isSubmissionRevoked(int $quizId, int $studentId): bool
+    {
+        $override = \App\Models\AssessmentStudentOverride::forAssessment('quiz', $quizId)
+            ->where('student_id', $studentId)
+            ->active()
+            ->first();
+
+        return $override !== null && ! $override->allow_submission;
+    }
+
+    /** Quiz that this student is allowed to open, or a 404 response. */
     protected function accessibleQuiz(Student $student, int $quizId): Quiz|JsonResponse
     {
         $quiz = Quiz::find($quizId);
-        if (! $quiz || ! $this->access->isVisibleStatus('quiz', $quiz->status) || ! $this->access->studentCanAccess($student, $quiz)) {
-            // Same answer for "does not exist" and "not yours": do not leak existence.
+        if (! $quiz || ! $this->access->studentCanAccess($student, $quiz)) {
+            return response()->json(['success' => false, 'message' => 'Quiz not found or you are not enrolled in this course.'], 404);
+        }
+
+        $override = $this->availability->getActiveOverride($quiz, $student);
+        $visible = $this->access->isVisibleStatus('quiz', $quiz->status)
+            || ($quiz->status === 'closed' && $override !== null);
+
+        if (! $visible) {
             return response()->json(['success' => false, 'message' => 'Quiz not found or you are not enrolled in this course.'], 404);
         }
 
@@ -53,75 +71,73 @@ class StudentQuizController extends Controller
     protected function ownedAttempt(Student $student, int $attemptId): QuizAttempt|JsonResponse
     {
         $attempt = QuizAttempt::with('quiz')->find($attemptId);
-        if (! $attempt || (int) $attempt->student_id !== (int) $student->id) {
+        if (! $attempt || (int) $attempt->student_id !== (int) $student->id || ! $attempt->quiz) {
             return response()->json(['success' => false, 'message' => 'Attempt not found.'], 404);
         }
 
         return $attempt;
     }
 
-    protected function questionsForStudent(Quiz $quiz): array
+    /** Format questions for taking a quiz (never leaks correct_answer or grading_guidance). */
+    protected function formatQuestionsForTaking(array $snapshots): array
     {
-        return QuizQuestion::where('quiz_id', $quiz->id)->orderBy('question_order')->get()->map(function (QuizQuestion $q) {
+        return collect($snapshots)->map(function (array $q) {
+            $qType = strtolower((string) ($q['question_type'] ?? 'multiple_choice'));
             $options = [];
             foreach (['A' => 'option_a', 'B' => 'option_b', 'C' => 'option_c', 'D' => 'option_d'] as $key => $col) {
-                if ($q->{$col} !== null && trim((string) $q->{$col}) !== '') {
-                    $options[] = ['key' => $key, 'text' => $q->{$col}];
+                $val = $q[$col] ?? null;
+                if ($val !== null && trim((string) $val) !== '') {
+                    $options[] = ['key' => $key, 'text' => (string) $val];
                 }
             }
-            if ($q->question_type === 'true_false') {
+            if ($qType === 'true_false') {
                 $options = [['key' => 'true', 'text' => 'True'], ['key' => 'false', 'text' => 'False']];
             }
 
             return [
-                'id' => $q->id,
-                'number' => $q->question_order,
-                'question_text' => $q->question_text,
-                'question_type' => $q->question_type,
-                'marks' => (float) $q->marks,
+                'id' => (int) ($q['id'] ?? 0),
+                'number' => (int) ($q['question_order'] ?? 1),
+                'question_text' => (string) ($q['question_text'] ?? ''),
+                'question_type' => $qType,
+                'marks' => (float) ($q['marks'] ?? 1),
+                'is_required' => array_key_exists('is_required', $q) ? (bool) $q['is_required'] : true,
                 'options' => $options,
             ];
         })->values()->all();
     }
 
-    protected function windowState(Quiz $quiz): string
+    /** Result payload returned to student, hiding score while manual grading is pending. */
+    protected function resultPayload(QuizAttempt $attempt, Quiz $quiz, ?array $access = null): array
     {
-        $now = now();
-        if ($quiz->status === 'closed' || ($quiz->end_at && $now->gt($quiz->end_at))) {
-            return 'closed';
-        }
-        if ($quiz->start_at && $now->lt($quiz->start_at)) {
-            return 'upcoming';
-        }
+        $pending = $attempt->isPendingManualGrading();
+        $graded = $attempt->isFinalized();
+        $totalMarks = (float) ($attempt->total_marks_snapshot
+            ?: QuizQuestion::where('quiz_id', $quiz->id)->sum('marks')
+            ?: $quiz->total_score);
 
-        return 'open';
-    }
-
-    protected function expiresAt(QuizAttempt $attempt): Carbon
-    {
-        $quiz = $attempt->quiz;
-        $limit = $attempt->started_at->copy()->addMinutes((int) ($quiz->duration_minutes ?: 30));
-
-        return ($quiz->end_at && $quiz->end_at->lt($limit)) ? $quiz->end_at->copy() : $limit;
-    }
-
-    /** Result visible to the student, honouring grading/release rules. */
-    protected function resultPayload(QuizAttempt $attempt, Quiz $quiz): array
-    {
-        $graded = $attempt->status === 'completed';
-        $reviewAllowed = in_array($attempt->status, ['completed', 'submitted'], true) && $this->windowState($quiz) === 'closed';
+        $windowState = $access['window_state'] ?? $this->availability->windowState($quiz);
+        $attemptsRemaining = $access['attempts_remaining'] ?? null;
+        $correctAnswersVisible = $windowState === 'closed'
+            || ($graded && $attemptsRemaining === 0);
 
         return [
             'id' => $attempt->id,
             'status' => $attempt->status,
+            'grading_status' => $pending ? 'pending_grading' : ($attempt->grading_status ?: ($graded ? 'auto_graded' : 'not_submitted')),
             'attempt_number' => $attempt->attempt_number,
             'started_at' => $attempt->started_at,
             'submitted_at' => $attempt->submitted_at,
+            'graded_at' => $graded ? $attempt->graded_at : null,
             'score' => $graded ? $attempt->score : null,
-            'total_marks' => (float) QuizQuestion::where('quiz_id', $quiz->id)->sum('marks') ?: (float) $quiz->total_score,
+            'auto_graded_score' => $graded ? $attempt->auto_graded_score : null,
+            'manual_graded_score' => $graded ? $attempt->manual_graded_score : null,
+            'total_marks' => $totalMarks,
+            'is_late' => (bool) $attempt->is_late,
+            'is_reset' => (bool) $attempt->is_reset,
             'score_released' => $graded,
-            'awaiting_manual_grading' => $attempt->status === 'submitted',
-            'review_allowed' => $reviewAllowed,
+            'awaiting_manual_grading' => $pending,
+            'review_allowed' => $attempt->status !== 'in_progress',
+            'correct_answers_visible' => $correctAnswersVisible,
         ];
     }
 
@@ -135,32 +151,71 @@ class StudentQuizController extends Controller
         }
         $quiz->load(['courseOffering.course', 'courseOffering.classRoom', 'courseOffering.semester.academicYear']);
 
-        $attempts = QuizAttempt::where('quiz_id', $quiz->id)->where('student_id', $student->id)->orderByDesc('attempt_number')->get();
-        $latest = $attempts->first();
-        $state = $this->windowState($quiz);
-        $inProgress = $attempts->firstWhere('status', 'in_progress');
-        $hasSubmitted = $attempts->contains(fn ($a) => $a->status !== 'in_progress');
-        $questionCount = QuizQuestion::where('quiz_id', $quiz->id)->count();
+        $access = $this->availability->evaluateStudentAccess($quiz, $student);
+        $universal = app(\App\Services\AssessmentReopenService::class)->evaluateQuizAccess($quiz, $student);
+        $latest = $access['active_attempts']->first() ?? $access['attempts']->first();
+        $totalMarks = (float) QuizQuestion::where('quiz_id', $quiz->id)->sum('marks') ?: (float) $quiz->total_score;
+        $effectiveScore = $this->grading->calculateStudentQuizScore($quiz, $access['attempts']);
+        $hasPending = $access['active_attempts']->contains(fn (QuizAttempt $a) => $a->isPendingManualGrading());
+
+        $history = $access['attempts']->map(fn (QuizAttempt $a) => $this->resultPayload($a, $quiz, $access))->values()->all();
+
+        $override = $access['override'];
 
         return response()->json(['success' => true, 'data' => [
             'id' => $quiz->id,
+            'assessment_type' => 'quiz',
+            'assessment_id' => $quiz->id,
+            'class_id' => $universal['class_id'],
             'title' => $quiz->title,
             'instructions' => $quiz->description,
-            'course_name' => $quiz->courseOffering?->course?->name,
-            'course_code' => $quiz->courseOffering?->course?->code,
+            'course_name' => $quiz->courseOffering?->course?->name ?? $quiz->course?->name,
+            'course_code' => $quiz->courseOffering?->course?->code ?? $quiz->course?->code,
             'class_name' => $quiz->courseOffering?->classRoom?->name,
-            'semester_name' => $quiz->courseOffering?->semester?->name,
+            'semester_name' => $quiz->courseOffering?->semester?->name ?? $quiz->semester?->name,
             'academic_year_name' => $quiz->courseOffering?->semester?->academicYear?->name,
             'status' => $quiz->status,
-            'window_state' => $state,
-            'total_questions' => $questionCount,
-            'total_marks' => (float) QuizQuestion::where('quiz_id', $quiz->id)->sum('marks') ?: (float) $quiz->total_score,
+            'window_state' => $access['window_state'],
+            'reopen_status' => $universal['reopen_status'],
+            'student_submission_status' => $universal['student_submission_status'],
+            'total_questions' => $access['question_count'],
+            'total_marks' => $totalMarks,
             'duration_minutes' => $quiz->duration_minutes,
             'start_at' => $quiz->start_at,
             'end_at' => $quiz->end_at,
-            'can_start' => $state === 'open' && $questionCount > 0 && ! $hasSubmitted,
-            'can_continue' => (bool) $inProgress && $state !== 'closed',
-            'attempt' => $latest ? $this->resultPayload($latest, $quiz) : null,
+            'effective_end_at' => $access['effective_end_at'],
+            'original_deadline' => $universal['original_deadline'],
+            'extended_deadline' => $universal['extended_deadline'],
+            'effective_deadline' => $universal['effective_deadline'],
+            'max_attempts' => $access['max_attempts'],
+            'base_max_attempts' => $access['base_max_attempts'],
+            'extra_attempts' => $access['extra_attempts'],
+            'original_attempt_limit' => $universal['original_attempt_limit'],
+            'additional_attempts' => $universal['additional_attempts'],
+            'attempts_used' => $access['attempts_used'],
+            'attempts_remaining' => $access['attempts_remaining'],
+            'remaining_attempts' => $universal['remaining_attempts'],
+            'scoring_method' => $quiz->scoring_method ?: 'highest',
+            'allow_submission' => $universal['allow_submission'],
+            'allow_late_submission' => $access['allow_late_submission'],
+            'allow_resubmission' => $universal['allow_resubmission'],
+            'effective_score' => ($hasPending && ($quiz->scoring_method === 'latest' || $effectiveScore === null)) ? null : $effectiveScore,
+            'has_pending_grading' => $hasPending,
+            'can_start' => $universal['can_start'],
+            'can_continue' => $universal['can_continue'],
+            'can_submit' => $universal['can_submit'],
+            'can_resubmit' => $universal['can_resubmit'],
+            'has_active_override' => $universal['has_active_override'],
+            'blocked_reason' => $universal['blocked_reason'],
+            'server_time' => $access['server_time'],
+            'override' => $override ? [
+                'extra_attempts' => (int) $override->extra_attempts,
+                'extended_end_at' => $override->extended_end_at,
+                'allow_late_submission' => (bool) $override->allow_late_submission,
+                'reason' => $override->reason,
+            ] : null,
+            'attempt' => $latest ? $this->resultPayload($latest, $quiz, $access) : null,
+            'attempts_history' => $history,
         ]]);
     }
 
@@ -173,43 +228,88 @@ class StudentQuizController extends Controller
             return $quiz;
         }
 
-        $state = $this->windowState($quiz);
-        if ($state === 'upcoming') {
-            return response()->json(['success' => false, 'message' => 'This quiz has not opened yet.'], 422);
-        }
-        if ($state === 'closed') {
-            return response()->json(['success' => false, 'message' => 'This quiz is closed.'], 422);
-        }
-        if (! QuizQuestion::where('quiz_id', $quiz->id)->exists()) {
-            return response()->json(['success' => false, 'message' => 'This quiz has no questions yet.'], 422);
-        }
+        $result = DB::transaction(function () use ($quiz, $student) {
+            $lockedQuiz = Quiz::whereKey($quiz->id)->lockForUpdate()->firstOrFail();
+            if ($this->isSubmissionRevoked($lockedQuiz->id, $student->id)) {
+                return ['error' => 'Submission permission for this quiz has been revoked by your instructor.', 'status' => 403];
+            }
+            $override = $this->availability->getActiveOverride($lockedQuiz, $student);
+            $windowState = $this->availability->windowState($lockedQuiz, $override);
 
-        $attempt = DB::transaction(function () use ($quiz, $student) {
-            $existing = QuizAttempt::where('quiz_id', $quiz->id)->where('student_id', $student->id)->lockForUpdate()->get();
-            if ($existing->contains(fn ($a) => $a->status !== 'in_progress')) {
-                return null;
+            if ($windowState === 'upcoming') {
+                return ['error' => 'This quiz has not opened yet.', 'status' => 422];
+            }
+            if ($windowState === 'closed') {
+                return ['error' => 'This quiz is closed.', 'status' => 422];
             }
 
-            return $existing->firstWhere('status', 'in_progress') ?? QuizAttempt::create([
-                'quiz_id' => $quiz->id,
+            $existing = QuizAttempt::where('quiz_id', $lockedQuiz->id)
+                ->where('student_id', $student->id)
+                ->lockForUpdate()
+                ->orderByDesc('attempt_number')
+                ->orderByDesc('id')
+                ->get();
+
+            $active = $existing->filter(fn (QuizAttempt $a) => ! $a->is_reset);
+            $inProgress = $active->first(fn (QuizAttempt $a) => $a->status === 'in_progress');
+            if ($inProgress) {
+                $this->grading->ensureAttemptSnapshot($inProgress);
+
+                return ['attempt' => $inProgress->fresh(), 'override' => $override];
+            }
+
+            $questionsSnapshot = $this->grading->snapshotQuizQuestions($lockedQuiz);
+            if (empty($questionsSnapshot)) {
+                return ['error' => 'This quiz has no questions yet.', 'status' => 422];
+            }
+
+            $usedCount = $active->filter(fn (QuizAttempt $a) => $a->status !== 'in_progress')->count();
+            $maxAttempts = $this->availability->effectiveMaxAttempts($lockedQuiz, $override);
+            if ($maxAttempts !== null && $usedCount >= $maxAttempts) {
+                return [
+                    'error' => "You have already used all {$maxAttempts} allowed attempt(s) for this quiz.",
+                    'status' => 409,
+                ];
+            }
+
+            $nextAttemptNumber = ((int) $existing->max('attempt_number')) + 1;
+            $totalMarks = round((float) collect($questionsSnapshot)->sum('marks'), 2);
+
+            $attempt = QuizAttempt::create([
+                'quiz_id' => $lockedQuiz->id,
                 'student_id' => $student->id,
-                'attempt_number' => $existing->count() + 1,
+                'attempt_number' => $nextAttemptNumber,
                 'started_at' => now(),
                 'status' => 'in_progress',
+                'grading_status' => 'not_submitted',
+                'total_marks_snapshot' => $totalMarks,
+                'quiz_version' => (int) ($lockedQuiz->version ?: 1),
+                'questions_snapshot' => $questionsSnapshot,
+                'is_late' => $windowState === 'late_open',
+                'is_reset' => false,
+                'override_id' => $override?->id,
             ]);
+
+            return ['attempt' => $attempt, 'override' => $override];
         });
 
-        if (! $attempt) {
-            return response()->json(['success' => false, 'message' => 'You have already submitted this quiz.'], 409);
+        if (isset($result['error'])) {
+            return response()->json(['success' => false, 'message' => $result['error']], $result['status']);
         }
+
+        /** @var QuizAttempt $attempt */
+        $attempt = $result['attempt'];
         $attempt->setRelation('quiz', $quiz);
+        $snapshots = $this->grading->resolveAttemptQuestions($attempt);
 
         return response()->json(['success' => true, 'data' => [
             'attempt_id' => $attempt->id,
+            'attempt_number' => $attempt->attempt_number,
             'started_at' => $attempt->started_at,
-            'expires_at' => $this->expiresAt($attempt),
+            'expires_at' => $this->availability->attemptExpiresAt($attempt, $quiz, $result['override']),
             'server_time' => now(),
-            'questions' => $this->questionsForStudent($quiz),
+            'is_late' => (bool) $attempt->is_late,
+            'questions' => $this->formatQuestionsForTaking($snapshots),
             'answers' => QuizAnswer::where('quiz_attempt_id', $attempt->id)->pluck('answer', 'question_id'),
         ]]);
     }
@@ -217,20 +317,42 @@ class StudentQuizController extends Controller
     /** PUT /api/student/quiz-attempts/{attemptId}/answers  body: { answers: [{question_id, answer}] } */
     public function saveAnswers(Request $request, int $attemptId): JsonResponse
     {
-        $attempt = $this->ownedAttempt($this->student($request), $attemptId);
+        $student = $this->student($request);
+        $attempt = $this->ownedAttempt($student, $attemptId);
         if ($attempt instanceof JsonResponse) {
             return $attempt;
         }
         if ($attempt->status !== 'in_progress') {
             return response()->json(['success' => false, 'message' => 'This attempt has already been submitted.'], 409);
         }
-        if (now()->gt($this->expiresAt($attempt)->addSeconds(self::GRACE_SECONDS))) {
+
+        if ($this->isSubmissionRevoked($attempt->quiz_id, $student->id)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Submission permission for this quiz has been revoked by your instructor.',
+            ], 403);
+        }
+
+        $override = $this->availability->getActiveOverride($attempt->quiz, $student);
+        if (now()->gt($this->availability->attemptExpiresAt($attempt, $attempt->quiz, $override)->addSeconds(self::GRACE_SECONDS))) {
             return response()->json(['success' => false, 'message' => 'Time is up. Submit the quiz to finish.', 'time_up' => true], 422);
         }
 
         $this->storeAnswers($request, $attempt);
+        $unansweredRequired = $this->findUnansweredRequiredQuestions($attempt);
+        $snapshots = $this->grading->resolveAttemptQuestions($attempt);
+        $answeredCount = $this->countNonBlankAnswers($attempt);
 
-        return response()->json(['success' => true, 'message' => 'Answers saved.']);
+        return response()->json([
+            'success' => true,
+            'message' => 'Answers saved.',
+            'data' => [
+                'answered' => $answeredCount,
+                'total_questions' => count($snapshots),
+                'unanswered_required_count' => count($unansweredRequired),
+                'unanswered_question_numbers' => array_column($unansweredRequired, 'number'),
+            ],
+        ]);
     }
 
     protected function storeAnswers(Request $request, QuizAttempt $attempt): void
@@ -241,22 +363,68 @@ class StudentQuizController extends Controller
             'answers.*.answer' => 'nullable|string|max:5000',
         ]);
 
-        $valid = QuizQuestion::where('quiz_id', $attempt->quiz_id)->pluck('id')->all();
+        $snapshotsById = collect($this->grading->resolveAttemptQuestions($attempt))
+            ->keyBy(fn ($q) => (int) ($q['id'] ?? 0));
+
         foreach ($data['answers'] ?? [] as $row) {
-            if (! in_array((int) $row['question_id'], $valid, true)) {
-                continue; // ignore questions that are not part of this quiz
+            $qId = (int) $row['question_id'];
+            if (! $snapshotsById->has($qId)) {
+                continue; // ignore questions not in this attempt's snapshot
             }
+
             $text = $row['answer'] ?? null;
-            if ($text === null || trim($text) === '') {
-                QuizAnswer::where('quiz_attempt_id', $attempt->id)->where('question_id', $row['question_id'])->delete();
+            if ($text === null || trim((string) $text) === '') {
+                QuizAnswer::where('quiz_attempt_id', $attempt->id)->where('question_id', $qId)->delete();
 
                 continue;
             }
+
             QuizAnswer::updateOrCreate(
-                ['quiz_attempt_id' => $attempt->id, 'question_id' => (int) $row['question_id']],
-                ['answer' => $text, 'is_correct' => null, 'marks_obtained' => null]
+                ['quiz_attempt_id' => $attempt->id, 'question_id' => $qId],
+                [
+                    'answer' => trim((string) $text),
+                    'is_correct' => null,
+                    'marks_obtained' => null,
+                    'grading_status' => 'pending_grading',
+                    'question_snapshot' => $snapshotsById->get($qId),
+                ]
             );
         }
+    }
+
+    /**
+     * @return array<int, array{id: int, number: int}>
+     */
+    protected function findUnansweredRequiredQuestions(QuizAttempt $attempt): array
+    {
+        $snapshots = $this->grading->resolveAttemptQuestions($attempt);
+        $answers = QuizAnswer::where('quiz_attempt_id', $attempt->id)->get()->keyBy('question_id');
+
+        $missing = [];
+        foreach ($snapshots as $q) {
+            $isRequired = array_key_exists('is_required', $q) ? (bool) $q['is_required'] : true;
+            if (! $isRequired) {
+                continue;
+            }
+            $qId = (int) ($q['id'] ?? 0);
+            $ans = $answers->get($qId);
+            if (! $ans || trim((string) $ans->answer) === '') {
+                $missing[] = [
+                    'id' => $qId,
+                    'number' => (int) ($q['question_order'] ?? 0),
+                ];
+            }
+        }
+
+        return $missing;
+    }
+
+    protected function countNonBlankAnswers(QuizAttempt $attempt): int
+    {
+        return QuizAnswer::where('quiz_attempt_id', $attempt->id)
+            ->get()
+            ->filter(fn (QuizAnswer $a) => trim((string) $a->answer) !== '')
+            ->count();
     }
 
     /** POST /api/student/quiz-attempts/{attemptId}/submit  body: { answers?: [...] } */
@@ -268,55 +436,135 @@ class StudentQuizController extends Controller
             return $attempt;
         }
         if ($attempt->status !== 'in_progress') {
-            return response()->json(['success' => false, 'message' => 'This quiz was already submitted.', 'data' => $this->resultPayload($attempt, $attempt->quiz)], 409);
+            $access = $this->availability->evaluateStudentAccess($attempt->quiz, $student);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'This quiz was already submitted.',
+                'data' => $this->resultPayload($attempt, $attempt->quiz, $access),
+            ], 409);
         }
 
-        $late = now()->gt($this->expiresAt($attempt)->addSeconds(self::GRACE_SECONDS));
-        if (! $late) {
+        if ($this->isSubmissionRevoked($attempt->quiz_id, $student->id)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Submission permission for this quiz has been revoked by your instructor.',
+            ], 403);
+        }
+
+        $override = $this->availability->getActiveOverride($attempt->quiz, $student);
+        $expiresAt = $this->availability->attemptExpiresAt($attempt, $attempt->quiz, $override);
+        $lateTimeout = now()->gt($expiresAt->copy()->addSeconds(self::GRACE_SECONDS));
+
+        if (! $lateTimeout) {
             $this->storeAnswers($request, $attempt);
+
+            $missingRequired = $this->findUnansweredRequiredQuestions($attempt);
+            if (! empty($missingRequired)) {
+                $snapshots = $this->grading->resolveAttemptQuestions($attempt);
+                $answered = $this->countNonBlankAnswers($attempt);
+                $numbers = array_values(array_map(fn ($m) => $m['number'], $missingRequired));
+                $ids = array_values(array_map(fn ($m) => $m['id'], $missingRequired));
+                $labels = implode(', ', array_map(fn ($n) => 'Q' . $n, $numbers));
+
+                return response()->json([
+                    'success' => false,
+                    'message' => "Please answer all required questions before submitting (Unanswered: {$labels}).",
+                    'errors' => [
+                        'answers' => ["Please answer all required questions ({$labels})."],
+                    ],
+                    'unanswered_question_ids' => $ids,
+                    'unanswered_question_numbers' => $numbers,
+                    'answered' => $answered,
+                    'unanswered' => count($missingRequired),
+                    'total_questions' => count($snapshots),
+                ], 422);
+            }
         }
 
-        $attempt->update(['submitted_at' => now()]);
+        $effectiveDeadline = $this->availability->effectiveDeadline($attempt->quiz, $override);
+        $isLate = (bool) $attempt->is_late || ($effectiveDeadline !== null && now()->gt($effectiveDeadline));
+
+        $attempt->update([
+            'submitted_at' => now(),
+            'is_late' => $isLate,
+        ]);
+
         $attempt = $this->grading->grade($attempt);
-        $answered = QuizAnswer::where('quiz_attempt_id', $attempt->id)->count();
-        $total = QuizQuestion::where('quiz_id', $attempt->quiz_id)->count();
+        $answered = $this->countNonBlankAnswers($attempt);
+        $total = count($this->grading->resolveAttemptQuestions($attempt));
+        $access = $this->availability->evaluateStudentAccess($attempt->quiz, $student);
 
         return response()->json([
             'success' => true,
-            'message' => $late ? 'Time was up; your saved answers were submitted.' : 'Quiz submitted successfully.',
-            'data' => $this->resultPayload($attempt, $attempt->quiz) + ['answered' => $answered, 'unanswered' => $total - $answered],
+            'message' => $lateTimeout
+                ? 'Time expired; your saved answers were submitted.'
+                : ($attempt->isPendingManualGrading()
+                    ? 'Quiz submitted successfully. Short-answer questions are awaiting teacher grading.'
+                    : 'Quiz submitted successfully.'),
+            'data' => $this->resultPayload($attempt, $attempt->quiz, $access) + [
+                'answered' => $answered,
+                'unanswered' => max(0, $total - $answered),
+            ],
         ]);
     }
 
-    /** GET /api/student/quiz-attempts/{attemptId}/review — only after the quiz closed. */
+    /** GET /api/student/quiz-attempts/{attemptId}/review */
     public function review(Request $request, int $attemptId): JsonResponse
     {
-        $attempt = $this->ownedAttempt($this->student($request), $attemptId);
+        $student = $this->student($request);
+        $attempt = $this->ownedAttempt($student, $attemptId);
         if ($attempt instanceof JsonResponse) {
             return $attempt;
         }
-        $result = $this->resultPayload($attempt, $attempt->quiz);
-        if (! $result['review_allowed']) {
-            return response()->json(['success' => false, 'message' => 'Answer review is not available yet.'], 403);
+        if ($attempt->status === 'in_progress') {
+            return response()->json(['success' => false, 'message' => 'Submit this attempt before reviewing answers.'], 403);
         }
 
+        $access = $this->availability->evaluateStudentAccess($attempt->quiz, $student);
+        $result = $this->resultPayload($attempt, $attempt->quiz, $access);
+        $showCorrect = (bool) ($result['correct_answers_visible'] ?? false);
+
+        $snapshots = $this->grading->resolveAttemptQuestions($attempt);
         $answers = QuizAnswer::where('quiz_attempt_id', $attempt->id)->get()->keyBy('question_id');
-        $items = QuizQuestion::where('quiz_id', $attempt->quiz_id)->orderBy('question_order')->get()->each->makeVisible('correct_answer')
-            ->map(function (QuizQuestion $q) use ($answers) {
-                $a = $answers->get($q->id);
 
-                return [
-                    'number' => $q->question_order,
-                    'question_text' => $q->question_text,
-                    'question_type' => $q->question_type,
-                    'marks' => (float) $q->marks,
-                    'your_answer' => $a?->answer,
-                    'correct_answer' => $q->correct_answer,
-                    'is_correct' => $a?->is_correct,
-                    'marks_obtained' => $a?->marks_obtained,
-                ];
-            })->values();
+        $items = collect($snapshots)->map(function (array $q) use ($answers, $showCorrect) {
+            $qId = (int) ($q['id'] ?? 0);
+            $a = $answers->get($qId);
+            $qType = strtolower((string) ($q['question_type'] ?? 'multiple_choice'));
+            $isPending = $a !== null && $a->grading_status === 'pending_grading';
 
-        return response()->json(['success' => true, 'data' => ['result' => $result, 'questions' => $items]]);
+            $options = [];
+            foreach (['A' => 'option_a', 'B' => 'option_b', 'C' => 'option_c', 'D' => 'option_d'] as $k => $col) {
+                if (! empty($q[$col])) {
+                    $options[] = ['key' => $k, 'text' => (string) $q[$col]];
+                }
+            }
+
+            return [
+                'question_id' => $qId,
+                'number' => (int) ($q['question_order'] ?? 1),
+                'question_text' => (string) ($q['question_text'] ?? ''),
+                'question_type' => $qType,
+                'marks' => (float) ($q['marks'] ?? 1),
+                'is_required' => array_key_exists('is_required', $q) ? (bool) $q['is_required'] : true,
+                'options' => $options,
+                'your_answer' => $a?->answer,
+                'grading_status' => $a ? ($a->grading_status ?: ($a->is_correct === null ? 'pending_grading' : 'auto_graded')) : 'unanswered',
+                'is_correct' => $isPending ? null : $a?->is_correct,
+                'marks_obtained' => $isPending ? null : $a?->marks_obtained,
+                'teacher_feedback' => $a?->teacher_feedback,
+                'graded_at' => $isPending ? null : $a?->graded_at,
+                'correct_answer' => $showCorrect ? ($q['correct_answer'] ?? null) : null,
+            ];
+        })->values();
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'result' => $result,
+                'questions' => $items,
+            ],
+        ]);
     }
 }

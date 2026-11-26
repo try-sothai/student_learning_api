@@ -2,6 +2,9 @@
 
 namespace App\Models;
 
+use App\Support\YearLevel;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -34,12 +37,53 @@ class ClassRoom extends Model
         'status',
     ];
 
+    protected $appends = ['year_level_code', 'year_level_name', 'year_level_khmer', 'year_level_label'];
+
+    protected static function booted(): void
+    {
+        static::saving(function (self $classRoom) {
+            if (empty($classRoom->code) && ! empty($classRoom->name)) {
+                $classRoom->code = strtoupper(preg_replace('/[^A-Za-z0-9\-]/', '-', (string) $classRoom->name));
+            }
+        });
+    }
+
     protected function casts(): array
     {
         return [
             'year_level' => 'integer',
             'capacity' => 'integer',
         ];
+    }
+
+    protected function yearLevelCode(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::code($this->year_level));
+    }
+
+    protected function yearLevelName(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::name($this->year_level));
+    }
+
+    protected function yearLevelKhmer(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::khmer($this->year_level));
+    }
+
+    protected function yearLevelLabel(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::label($this->year_level));
+    }
+
+    public function scopeForYearLevel(Builder $query, mixed $yearLevel): Builder
+    {
+        $parsed = YearLevel::parse($yearLevel);
+        if ($parsed === null) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        return $query->where('year_level', $parsed);
     }
 
     public function building(): BelongsTo

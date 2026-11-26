@@ -11,6 +11,7 @@ use App\Models\CourseOffering;
 use App\Models\Quiz;
 use App\Models\QuizAttempt;
 use App\Models\Teacher;
+use App\Support\YearLevel;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
@@ -224,6 +225,7 @@ class TeacherAnalyticsService
         $assignmentIds = $assignments->pluck('id')->all();
 
         $submissions = AssignmentSubmission::whereIn('assignment_id', $assignmentIds)
+            ->where('is_latest', true)
             ->whereIn('status', ['submitted', 'late', 'graded'])
             ->get(['id', 'assignment_id', 'status', 'submitted_at']);
 
@@ -366,12 +368,16 @@ class TeacherAnalyticsService
     {
         $firstOffering = (clone $offeringsQuery)->with(['course', 'classRoom', 'semester.academicYear'])->first();
 
+        $yl = YearLevel::parse($filters['year_level'] ?? $filters['study_year'] ?? null);
+
         return [
             'academic_year' => $firstOffering?->semester?->academicYear?->name ?? 'All Assigned Years',
             'semester' => $firstOffering?->semester?->name ?? 'All Assigned Semesters',
             'course' => $firstOffering?->course?->name ?? $firstOffering?->course?->course_name ?? 'All Assigned Courses',
             'class' => $firstOffering?->classRoom?->name ?? 'All Assigned Classes',
-            'study_year' => isset($filters['study_year']) ? 'Year ' . $filters['study_year'] : null,
+            'year_level' => $yl !== null ? YearLevel::label($yl) : null,
+            'year_level_code' => $yl !== null ? YearLevel::code($yl) : null,
+            'study_year' => $yl !== null ? YearLevel::name($yl) : null,
         ];
     }
 }

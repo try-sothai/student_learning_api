@@ -4,7 +4,7 @@
 
 @section('content')
 <div class="student-page">
-    @include('components.student.page-header', ['title' => 'Reports', 'subtitle' => 'Your personal academic performance summary.', 'action' => ''])
+    @include('components.student.page-header', ['title' => 'Reports', 'subtitle' => 'Your personal academic performance summary.' . (!empty($studentProfile) ? ' · ' . ($studentProfile->year_level_label ?? ($studentProfile->year_level ?: 'Unassigned')) . ($studentProfile->resolveAcademicYearName() ? ' (' . $studentProfile->resolveAcademicYearName() . ')' : '') : ''), 'action' => ''])
 
     <div class="row g-3 mb-4">
         @foreach($summary as $card)

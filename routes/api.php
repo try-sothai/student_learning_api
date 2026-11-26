@@ -2,6 +2,7 @@
 
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AcademicYearController;
+use App\Http\Controllers\AcademicCalendarController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AssignmentController;
 use App\Http\Controllers\AssignmentSubmissionController;
@@ -9,8 +10,10 @@ use App\Http\Controllers\AttendanceController;
 use App\Http\Controllers\AttendanceDetailController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ClassRoomController;
+use App\Http\Controllers\CourseCategoryController;
 use App\Http\Controllers\CourseController;
 use App\Http\Controllers\CourseEnrollmentController;
+use App\Http\Controllers\CurriculumController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DepartmentController;
 use App\Http\Controllers\ExamController;
@@ -21,6 +24,7 @@ use App\Http\Controllers\LearningAnalyticController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\PerformanceRecordController;
 use App\Http\Controllers\PredictionController;
+use App\Http\Controllers\ProgramController;
 use App\Http\Controllers\QuizAnswerController;
 use App\Http\Controllers\QuizAttemptController;
 use App\Http\Controllers\QuizController;
@@ -29,6 +33,7 @@ use App\Http\Controllers\RecommendationController;
 use App\Http\Controllers\ReportController;
 use App\Http\Controllers\RiskAssessmentController;
 use App\Http\Controllers\SemesterController;
+use App\Http\Controllers\StudentAcademicHistoryController;
 use App\Http\Controllers\StudentController;
 use App\Http\Controllers\TeacherController;
 
@@ -45,28 +50,9 @@ Route::post('/login', [AuthController::class, 'loginApi']);
 | System Resources & Catalog APIs
 |--------------------------------------------------------------------------
 */
-Route::apiResource('departments', DepartmentController::class);
-Route::apiResource('academic-years', AcademicYearController::class);
-Route::apiResource('semesters', SemesterController::class);
-Route::apiResource('classes', ClassRoomController::class)->parameters(['classes' => 'classRoom']);
-Route::apiResource('buildings', \App\Http\Controllers\BuildingController::class)->only(['index', 'show']);
-Route::apiResource('floors', \App\Http\Controllers\FloorController::class)->only(['index', 'show']);
-Route::apiResource('class-schedules', \App\Http\Controllers\ClassScheduleController::class)->only(['index']);
-
-Route::apiResource('students', StudentController::class)->only(['index', 'show']);
-Route::apiResource('teachers', TeacherController::class)->only(['index', 'show']);
-
-Route::apiResource('courses', CourseController::class)->only(['index', 'show']);
-Route::apiResource('course-enrollments', CourseEnrollmentController::class);
-
-Route::apiResource('attendance', AttendanceController::class);
-Route::apiResource('attendance-details', AttendanceDetailController::class);
-
+// Protected resources are registered inside the auth:sanctum group below.
 // Assessment resources are NOT public: they are registered below inside the
 // auth:sanctum group with role/ownership checks (see "Assessment resources").
-
-Route::apiResource('notifications', NotificationController::class);
-Route::apiResource('reports', ReportController::class);
 
 /*
 |--------------------------------------------------------------------------
@@ -79,8 +65,43 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/profile', [AuthController::class, 'updateProfile']);
     Route::post('/profile', [AuthController::class, 'updateProfile']);
     Route::post('/change-password', [AuthController::class, 'changePassword']);
+
+    Route::get('/notifications/unread-count', [NotificationController::class, 'apiUnreadCount']);
     Route::post('/notifications/read-all', [NotificationController::class, 'markAllRead']);
     Route::patch('/notifications/{notification}/read', [NotificationController::class, 'update']);
+    Route::apiResource('notifications', NotificationController::class);
+
+    Route::apiResource('departments', DepartmentController::class)->only(['index', 'show']);
+    Route::apiResource('faculties', DepartmentController::class)->only(['index', 'show'])->parameters(['faculties' => 'department']);
+    Route::get('departments/{department}/programs', [ProgramController::class, 'byDepartment'])->whereNumber('department');
+    Route::get('faculties/{department}/majors', [ProgramController::class, 'byDepartment'])->whereNumber('department');
+    Route::apiResource('programs', ProgramController::class)->only(['index', 'show']);
+    Route::apiResource('majors', ProgramController::class)->only(['index', 'show'])->parameters(['majors' => 'program']);
+    Route::get('programs/{program}/courses', [ProgramController::class, 'courses'])->whereNumber('program');
+    Route::get('majors/{program}/courses', [ProgramController::class, 'courses'])->whereNumber('program');
+    Route::get('programs/{program}/curriculum', [CurriculumController::class, 'byProgram'])->whereNumber('program');
+    Route::get('majors/{program}/curriculum', [CurriculumController::class, 'byProgram'])->whereNumber('program');
+    Route::apiResource('curricula', CurriculumController::class)->only(['index'])->parameters(['curricula' => 'curriculum']);
+    Route::get('academic-calendar/periods', [AcademicCalendarController::class, 'index']);
+    Route::get('academic-calendar/periods/{period}', [AcademicCalendarController::class, 'show'])->whereNumber('period');
+    Route::get('academic-calendar/audits', [AcademicCalendarController::class, 'audits']);
+    Route::apiResource('course-categories', CourseCategoryController::class)->only(['index', 'show'])->parameters(['course-categories' => 'courseCategory']);
+    Route::apiResource('academic-years', AcademicYearController::class)->only(['index', 'show']);
+    Route::apiResource('semesters', SemesterController::class)->only(['index', 'show']);
+    Route::apiResource('classes', ClassRoomController::class)->only(['index', 'show'])->parameters(['classes' => 'classRoom']);
+    Route::apiResource('buildings', \App\Http\Controllers\BuildingController::class)->only(['index', 'show']);
+    Route::apiResource('floors', \App\Http\Controllers\FloorController::class)->only(['index', 'show']);
+    Route::apiResource('class-schedules', \App\Http\Controllers\ClassScheduleController::class)->only(['index']);
+
+    Route::apiResource('students', StudentController::class)->only(['index', 'show']);
+    Route::apiResource('teachers', TeacherController::class)->only(['index', 'show']);
+
+    Route::apiResource('courses', CourseController::class)->only(['index', 'show']);
+    Route::apiResource('course-enrollments', CourseEnrollmentController::class)->only(['index', 'show']);
+
+    Route::apiResource('attendance', AttendanceController::class)->only(['index', 'show']);
+    Route::apiResource('attendance-details', AttendanceDetailController::class)->only(['index', 'show']);
+    Route::apiResource('reports', ReportController::class)->only(['index', 'show']);
 
     // Student Endpoints (enforces student profile presence with 404 in controller)
     Route::get('/dashboard/student', [DashboardController::class, 'student']);
@@ -88,12 +109,18 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/student/assignments', [DashboardController::class, 'studentAssignments']);
     Route::get('/student/quizzes', [DashboardController::class, 'studentQuizzes']);
     Route::get('/student/exams', [DashboardController::class, 'studentExams']);
+    Route::get('/student/gpa-overview', [StudentAcademicHistoryController::class, 'gpaOverview']);
+    Route::get('/student/gpa-history', [StudentAcademicHistoryController::class, 'gpaHistory']);
+    Route::get('/student/progression-status', [StudentAcademicHistoryController::class, 'progressionStatus']);
+    Route::get('/student/retakes', [StudentAcademicHistoryController::class, 'retakes']);
+    Route::post('/student/retakes/enroll', [StudentAcademicHistoryController::class, 'enrollRetake']);
 
     // Assessment resources. Reads are scoped per role inside the controllers
     // (student: enrolled offerings only, teacher: own offerings only, admin: all).
     Route::apiResource('assignments', AssignmentController::class)->only(['index', 'show']);
     Route::apiResource('quizzes', QuizController::class)->only(['index', 'show']);
     Route::apiResource('exams', ExamController::class)->only(['index', 'show']);
+    Route::apiResource('exam-results', ExamResultController::class)->only(['index', 'show']);
     Route::apiResource('assignment-submissions', AssignmentSubmissionController::class)->only(['index', 'show', 'store']);
 
     // Student quiz flow (identity from token; one attempt holds all answers).
@@ -106,6 +133,12 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/submissions', [AssignmentSubmissionController::class, 'mySubmissions']);
         Route::get('/submissions/{assignmentSubmission}', [AssignmentSubmissionController::class, 'showStudentSubmission'])->whereNumber('assignmentSubmission');
         Route::get('/submissions/{assignmentSubmission}/file', [AssignmentSubmissionController::class, 'streamMySubmissionFile'])->whereNumber('assignmentSubmission');
+
+        // Universal Reopen, Retake & Submission History (Student self-scoped)
+        $reopenCtrl = \App\Http\Controllers\AssessmentReopenController::class;
+        Route::get('/assessments/{assessmentType}/{assessmentId}/reopen-status', [$reopenCtrl, 'studentReopenStatus'])->whereNumber('assessmentId');
+        Route::get('/assessments/{assessmentType}/{assessmentId}/submission-history', [$reopenCtrl, 'studentSubmissionHistory'])->whereNumber('assessmentId');
+        Route::get('/assessments/quiz/{assessmentId}/attempt-history', [$reopenCtrl, 'studentQuizAttemptHistory'])->whereNumber('assessmentId');
     });
 
     // Raw CRUD / grading tables: administrators only. Teachers use /teacher/* (offering-scoped).
@@ -117,7 +150,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::apiResource('quiz-questions', QuizQuestionController::class);
         Route::apiResource('quiz-attempts', QuizAttemptController::class);
         Route::apiResource('quiz-answers', QuizAnswerController::class);
-        Route::apiResource('exam-results', ExamResultController::class);
+        Route::apiResource('exam-results', ExamResultController::class)->only(['store', 'update', 'destroy']);
     });
     Route::get('/student/my-analytics', [LearningAnalyticController::class, 'myAnalytics']);
 
@@ -131,6 +164,11 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/attendance/courses/{id}', [\App\Http\Controllers\StudentModuleController::class, 'attendanceCourse']);
         Route::get('/grades', [\App\Http\Controllers\StudentModuleController::class, 'gradesOverview']);
         Route::get('/grades/courses/{id}', [\App\Http\Controllers\StudentModuleController::class, 'gradesCourse']);
+        Route::get('/gpa-overview', [StudentAcademicHistoryController::class, 'gpaOverview']);
+        Route::get('/gpa-history', [StudentAcademicHistoryController::class, 'gpaHistory']);
+        Route::get('/progression-status', [StudentAcademicHistoryController::class, 'progressionStatus']);
+        Route::get('/retakes', [StudentAcademicHistoryController::class, 'retakes']);
+        Route::post('/retakes/enroll', [StudentAcademicHistoryController::class, 'enrollRetake']);
         Route::get('/analytics', [\App\Http\Controllers\StudentModuleController::class, 'analytics']);
         Route::get('/recommendations', [\App\Http\Controllers\StudentModuleController::class, 'recommendations']);
         Route::get('/predictions-risk', [\App\Http\Controllers\StudentModuleController::class, 'predictionsAndRisk']);
@@ -172,30 +210,81 @@ Route::middleware('auth:sanctum')->group(function () {
             Route::get('/teaching-assignments', [$ta, 'teachingAssignments']);
             Route::get('/course-offerings/{id}/exams', [$ta, 'offeringExams']);
             Route::post('/course-offerings/{id}/exams', [$ta, 'storeExam']);
+            Route::get('/exams/{examId}', [$ta, 'showExam']);
             Route::put('/exams/{examId}', [$ta, 'updateExam']);
             Route::delete('/exams/{examId}', [$ta, 'deleteExam']);
+            Route::post('/exams/{examId}/scores', [$ta, 'storeExamScores']);
+            Route::patch('/exams/{examId}/publish', [$ta, 'publishExam']);
+            Route::post('/exams/{examId}/publish', [$ta, 'publishExam']);
+            Route::patch('/exams/{examId}/unpublish', [$ta, 'unpublishExam']);
             Route::get('/quizzes/{quizId}', [$ta, 'showQuiz']);
             Route::put('/quizzes/{quizId}', [$ta, 'updateQuiz']);
             Route::delete('/quizzes/{quizId}', [$ta, 'deleteQuiz']);
             Route::get('/quizzes/{quizId}/attempts', [$ta, 'quizAttempts']);
             Route::get('/quiz-attempts/{attemptId}', [$ta, 'showQuizAttempt']);
+            Route::post('/quiz-attempts/{attemptId}/grade', [$ta, 'gradeAttemptAnswers']);
             Route::post('/quizzes/{quizId}/questions', [$ta, 'storeQuestion']);
             Route::put('/quizzes/{quizId}/questions/reorder', [$ta, 'reorderQuestions']);
             Route::patch('/quizzes/{quizId}/publish', [$ta, 'publishQuiz']);
+            Route::patch('/quizzes/{quizId}/unpublish', [$ta, 'unpublishQuiz']);
+            Route::post('/quizzes/{quizId}/reopen', [$ta, 'reopenQuiz']);
+            Route::get('/quizzes/{quizId}/students', [$ta, 'quizStudents']);
+            Route::get('/quizzes/{quizId}/overrides', [$ta, 'quizOverrides']);
+            Route::post('/quizzes/{quizId}/overrides', [$ta, 'storeQuizOverride']);
+            Route::delete('/quizzes/{quizId}/overrides/{studentId}', [$ta, 'revokeQuizOverride']);
+            Route::get('/quizzes/{quizId}/audit-logs', [$ta, 'quizAuditLogs']);
             Route::put('/quiz-questions/{questionId}', [$ta, 'updateQuestion']);
             Route::delete('/quiz-questions/{questionId}', [$ta, 'deleteQuestion']);
             Route::post('/quiz-questions/{questionId}/duplicate', [$ta, 'duplicateQuestion']);
             Route::patch('/quiz-answers/{answerId}/grade', [$ta, 'gradeAnswer']);
             Route::get('/course-offerings/{id}/scores', [\App\Http\Controllers\TeacherModuleController::class, 'courseOfferingScores']);
             Route::post('/course-offerings/{id}/scores', [\App\Http\Controllers\TeacherModuleController::class, 'storeScore']);
+
+            // Universal Reopen, Extension, Additional Attempts, Revocation, History & Audit Logs
+            $reopenCtrl = \App\Http\Controllers\AssessmentReopenController::class;
+            Route::get('/assessments/audit-logs', [$reopenCtrl, 'auditLogs']);
+            Route::post('/assessments/reopen', [$reopenCtrl, 'reopen']);
+            Route::post('/assessments/extend-deadline', [$reopenCtrl, 'extendDeadline']);
+            Route::post('/assessments/grant-attempts', [$reopenCtrl, 'grantAttempts']);
+            Route::post('/assessments/revoke-reopen', [$reopenCtrl, 'revokeReopen']);
+            Route::get('/assessments/{assessmentType}/{assessmentId}/reopen-status', [$reopenCtrl, 'getReopenStatus'])->whereNumber('assessmentId');
+            Route::get('/assessments/{assessmentType}/{assessmentId}/submission-history', [$reopenCtrl, 'submissionHistory'])->whereNumber('assessmentId');
+            Route::get('/assessments/quiz/{assessmentId}/attempt-history', [$reopenCtrl, 'quizAttemptHistory'])->whereNumber('assessmentId');
+            Route::delete('/assessments/{assessmentType}/{assessmentId}/overrides/{studentId}', [$reopenCtrl, 'revokeStudentOverride'])
+                ->whereNumber('assessmentId')
+                ->whereNumber('studentId');
         });
     });
 
-    Route::get('/notifications/unread-count', [NotificationController::class, 'apiUnreadCount']);
     Route::get('/my-schedules', [\App\Http\Controllers\ClassScheduleController::class, 'mySchedules']);
+
+    Route::middleware('role:teacher,admin')->group(function () {
+        Route::apiResource('attendance', AttendanceController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('attendance-details', AttendanceDetailController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('reports', ReportController::class)->only(['store', 'update', 'destroy']);
+    });
 
     // Admin Only Protected Endpoints
     Route::middleware('role:admin')->group(function () {
+        Route::apiResource('departments', DepartmentController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('faculties', DepartmentController::class)->only(['store', 'update', 'destroy'])->parameters(['faculties' => 'department']);
+        Route::apiResource('programs', ProgramController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('majors', ProgramController::class)->only(['store', 'update', 'destroy'])->parameters(['majors' => 'program']);
+        Route::apiResource('course-categories', CourseCategoryController::class)->only(['store', 'update', 'destroy'])->parameters(['course-categories' => 'courseCategory']);
+        Route::apiResource('curricula', CurriculumController::class)->only(['store', 'update', 'destroy'])->parameters(['curricula' => 'curriculum']);
+        Route::post('curriculum', [CurriculumController::class, 'store']);
+        Route::put('curriculum/{curriculum}', [CurriculumController::class, 'update'])->whereNumber('curriculum');
+        Route::delete('curriculum/{curriculum}', [CurriculumController::class, 'destroy'])->whereNumber('curriculum');
+        Route::post('academic-calendar/periods', [AcademicCalendarController::class, 'store']);
+        Route::put('academic-calendar/periods/{period}', [AcademicCalendarController::class, 'update'])->whereNumber('period');
+        Route::delete('academic-calendar/periods/{period}', [AcademicCalendarController::class, 'destroy'])->whereNumber('period');
+        Route::post('admin/students/{student}/retakes/enroll', [StudentAcademicHistoryController::class, 'enrollRetake'])->whereNumber('student');
+        Route::post('courses/{course}/majors', [CourseController::class, 'assignMajors'])->whereNumber('course');
+        Route::put('courses/{course}/majors', [CourseController::class, 'assignMajors'])->whereNumber('course');
+        Route::apiResource('academic-years', AcademicYearController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('semesters', SemesterController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('classes', ClassRoomController::class)->only(['store', 'update', 'destroy'])->parameters(['classes' => 'classRoom']);
+        Route::apiResource('course-enrollments', CourseEnrollmentController::class)->only(['store', 'update', 'destroy']);
         Route::apiResource('buildings', \App\Http\Controllers\BuildingController::class)->only(['store', 'update', 'destroy']);
         Route::apiResource('floors', \App\Http\Controllers\FloorController::class)->only(['store', 'update', 'destroy']);
         Route::apiResource('class-schedules', \App\Http\Controllers\ClassScheduleController::class)->only(['store', 'update', 'destroy']);

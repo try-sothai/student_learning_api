@@ -14,6 +14,7 @@ use App\Models\Program;
 use App\Models\RiskAssessment;
 use App\Models\Semester;
 use App\Models\Teacher;
+use App\Support\YearLevel;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 
@@ -92,13 +93,15 @@ class TeacherDashboardService
                     $q->whereIn('course_offering_id', $offeringIds)
                       ->orWhereIn('course_id', $courseIds);
                 })
-                ->whereIn('status', ['submitted', 'pending'])
+                ->where('is_latest', true)
+                ->whereIn('status', ['submitted', 'pending', 'late'])
                 ->whereNull('score')
                 ->count();
         } elseif (! empty($courseIds)) {
             $pendingAssignments = AssignmentSubmission::query()
                 ->whereHas('assignment', fn (Builder $q) => $q->whereIn('course_id', $courseIds))
-                ->whereIn('status', ['submitted', 'pending'])
+                ->where('is_latest', true)
+                ->whereIn('status', ['submitted', 'pending', 'late'])
                 ->whereNull('score')
                 ->count();
         }
@@ -203,13 +206,18 @@ class TeacherDashboardService
                     'code' => $cl->code,
                     'name' => $cl->name,
                     'year_level' => $cl->year_level,
+                    'year_level_code' => YearLevel::code($cl->year_level),
+                    'year_level_label' => YearLevel::label($cl->year_level),
                 ]);
             }
 
             if ($offering->study_year) {
-                $studyYears->put($offering->study_year, [
-                    'year' => (int) $offering->study_year,
-                    'name' => 'Year ' . $offering->study_year,
+                $parsedYear = YearLevel::parse($offering->study_year) ?? (int) $offering->study_year;
+                $studyYears->put($parsedYear, [
+                    'year' => $parsedYear,
+                    'code' => YearLevel::code($parsedYear),
+                    'name' => YearLevel::name($parsedYear) ?? ('Year ' . $parsedYear),
+                    'label' => YearLevel::label($parsedYear),
                 ]);
             }
         }
@@ -239,6 +247,7 @@ class TeacherDashboardService
             'programs' => $programs->values()->all(),
             'academic_years' => $academicYears->values()->all(),
             'study_years' => $studyYears->sortBy('year')->values()->all(),
+            'year_levels' => YearLevel::options(),
             'semesters' => $semesters->values()->all(),
             'courses' => $courses->values()->all(),
             'classes' => $classes->values()->all(),
@@ -275,7 +284,10 @@ class TeacherDashboardService
             $query->where('program_id', $filters['program_id']);
         }
 
-        if (! empty($filters['study_year'])) {
+        $ylFilter = YearLevel::parse($filters['year_level'] ?? $filters['study_year'] ?? null);
+        if ($ylFilter !== null) {
+            $query->where('study_year', $ylFilter);
+        } elseif (! empty($filters['study_year'])) {
             $query->where('study_year', $filters['study_year']);
         }
     }

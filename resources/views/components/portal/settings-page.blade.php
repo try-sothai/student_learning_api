@@ -1,6 +1,8 @@
 @php
     $isStudent = strtolower($audience ?? '') === 'student';
-    $studentProfile = $isStudent ? Auth::user()->student : null;
+    $studentProfile = $isStudent
+        ? \App\Models\Student::with(['department', 'classRoom.academicYear', 'program', 'courseEnrollments.semester.academicYear'])->where('user_id', Auth::id())->first()
+        : null;
     $profileRoute = match (strtolower($audience ?? 'admin')) {
         'student' => 'student.profile.update',
         'teacher' => 'teacher.profile.update',
@@ -39,11 +41,12 @@
                             <div class="col-md-6"><label class="form-label small fw-semibold">Nationality</label><input class="form-control" value="{{ $studentProfile?->nationality ?? 'Not set' }}" readonly></div>
                             <div class="col-md-6"><label class="form-label small fw-semibold">Phone</label><input class="form-control" value="{{ $studentProfile?->phone ?? 'Not set' }}" readonly></div>
                             <div class="col-md-6"><label class="form-label small fw-semibold">Address</label><input class="form-control" value="{{ $studentProfile?->address ?? 'Not set' }}" readonly></div>
-                            <div class="col-md-6"><label class="form-label small fw-semibold">Department</label><input class="form-control" value="{{ $studentProfile?->department?->name ?? 'Not set' }}" readonly></div>
-                            <div class="col-md-6"><label class="form-label small fw-semibold">Major</label><input class="form-control" value="{{ $studentProfile?->major ?? 'Not set' }}" readonly></div>
-                            <div class="col-md-6"><label class="form-label small fw-semibold">Year level</label><input class="form-control" value="{{ $studentProfile?->year_level ?? 'Not set' }}" readonly></div>
-                            <div class="col-md-6"><label class="form-label small fw-semibold">Semester</label><input class="form-control" value="{{ $studentProfile?->semester ?? 'Not set' }}" readonly></div>
-                            <div class="col-md-6"><label class="form-label small fw-semibold">Academic year</label><input class="form-control" value="{{ $studentProfile?->academic_year ?? 'Not set' }}" readonly></div>
+                            <div class="col-md-6"><label class="form-label small fw-semibold">Faculty</label><input class="form-control" value="{{ $studentProfile?->department?->name ?? 'Not set' }}" readonly></div>
+                            <div class="col-md-6"><label class="form-label small fw-semibold">Major</label><input class="form-control" value="{{ $studentProfile?->program?->name ?? ($studentProfile?->major ?: 'Not set') }}" readonly></div>
+                            <div class="col-md-6"><label class="form-label small fw-semibold">Year level</label><input class="form-control" value="{{ $studentProfile?->year_level_label ?? ($studentProfile?->year_level ?: 'Not set') }}" readonly></div>
+                            <div class="col-md-6"><label class="form-label small fw-semibold">Class</label><input class="form-control" value="{{ $studentProfile?->classRoom?->code ?? $studentProfile?->classRoom?->name ?? 'Not set' }}" readonly></div>
+                            <div class="col-md-6"><label class="form-label small fw-semibold">Semester</label><input class="form-control" value="{{ $studentProfile?->resolveSemesterName() ?? 'Not set' }}" readonly></div>
+                            <div class="col-md-6"><label class="form-label small fw-semibold">Academic year</label><input class="form-control" value="{{ $studentProfile?->resolveAcademicYearName() ?? 'Not set' }}" readonly></div>
                             <div class="col-md-6"><label class="form-label small fw-semibold">Advisor</label><input class="form-control" value="{{ $studentProfile?->advisor ?? 'Not set' }}" readonly></div>
                             <div class="col-md-6"><label class="form-label small fw-semibold">Enrollment date</label><input class="form-control" value="{{ $studentProfile?->enrollment_date ? \Carbon\Carbon::parse($studentProfile->enrollment_date)->format('M d, Y') : 'Not set' }}" readonly></div>
                             <div class="col-md-6"><label class="form-label small fw-semibold">Status</label><input class="form-control" value="{{ $studentProfile?->status ? ucfirst($studentProfile->status) : 'Not set' }}" readonly></div>

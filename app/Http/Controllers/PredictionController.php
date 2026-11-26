@@ -9,16 +9,45 @@ class PredictionController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Prediction::with(['student.user', 'course', 'semester']);
+        $apiUser = $this->resolveApiUser($request);
+        if (! $apiUser) {
+            return response()->json(['message' => 'Unauthenticated.'], 401);
+        }
 
-        $apiUser = auth('sanctum')->user() ?? $request->user();
-        if ($apiUser && $apiUser->role === 'student') {
+        $query = Prediction::with(['student.user', 'student.classRoom.academicYear', 'course', 'semester.academicYear']);
+
+        if ($apiUser->role === 'student') {
             if (! $apiUser->student) {
                 return response()->json(['message' => 'Student profile not found.'], 404);
             }
             $query->where('student_id', $apiUser->student->id);
-        } elseif ($request->has('student_id')) {
-            $query->where('student_id', $request->student_id);
+        } elseif ($apiUser->role === 'teacher') {
+            $teacher = $this->resolveTeacherForUser($apiUser);
+            $authorizedIds = $teacher ? $this->teacherAuthService()->getAuthorizedStudentIds($teacher) : [];
+            if (empty($authorizedIds)) {
+                $query->whereRaw('1 = 0');
+            } else {
+                $query->whereIn('student_id', $authorizedIds);
+            }
+            if ($request->has('student_id')) {
+                $query->where('student_id', (int) $request->student_id);
+            }
+        } elseif ($apiUser->role === 'admin') {
+            if ($request->has('student_id')) {
+                $query->where('student_id', $request->student_id);
+            }
+        } else {
+            return response()->json(['message' => 'Unauthorized action.'], 403);
+        }
+
+        if ($request->filled('academic_year_id')) {
+            $ayId = (int) $request->academic_year_id;
+            $query->whereHas('semester', fn ($q) => $q->where('academic_year_id', $ayId));
+        }
+
+        if ($request->filled('year_level') && strtolower((string) $request->query('year_level')) !== 'all') {
+            $yl = (string) $request->query('year_level');
+            $query->whereHas('student', fn ($sq) => strtolower($yl) === 'missing' ? $sq->missingYearLevel() : $sq->forYearLevel($yl));
         }
 
         if ($request->has('course_id')) {
@@ -50,6 +79,15 @@ class PredictionController extends Controller
             'notes' => 'nullable|string',
         ]);
 
+        if ($denied = $this->authorizeStudentScopedAccess(
+            $request,
+            (int) $validated['student_id'],
+            ! empty($validated['course_id']) ? (int) $validated['course_id'] : null,
+            false
+        )) {
+            return $denied;
+        }
+
         $prediction = Prediction::create([
             'student_id' => $validated['student_id'],
             'course_id' => $validated['course_id'] ?? null,
@@ -70,11 +108,8 @@ class PredictionController extends Controller
 
     public function show(Request $request, Prediction $prediction)
     {
-        $apiUser = auth('sanctum')->user() ?? $request->user();
-        if ($apiUser && $apiUser->role === 'student') {
-            if (! $apiUser->student || (int) $prediction->student_id !== (int) $apiUser->student->id) {
-                return response()->json(['message' => 'Unauthorized access.'], 403);
-            }
+        if ($denied = $this->authorizeStudentScopedAccess($request, (int) $prediction->student_id)) {
+            return $denied;
         }
 
         return response()->json([
@@ -85,6 +120,15 @@ class PredictionController extends Controller
 
     public function update(Request $request, Prediction $prediction)
     {
+        if ($denied = $this->authorizeStudentScopedAccess(
+            $request,
+            (int) $prediction->student_id,
+            $prediction->course_id ? (int) $prediction->course_id : null,
+            false
+        )) {
+            return $denied;
+        }
+
         $validated = $request->validate([
             'predicted_score' => 'required|numeric|min:0|max:100',
             'confidence_score' => 'nullable|numeric|min:0|max:1.0',
@@ -99,8 +143,17 @@ class PredictionController extends Controller
         ], 200);
     }
 
-    public function destroy(Prediction $prediction)
+    public function destroy(Request $request, Prediction $prediction)
     {
+        if ($denied = $this->authorizeStudentScopedAccess(
+            $request,
+            (int) $prediction->student_id,
+            $prediction->course_id ? (int) $prediction->course_id : null,
+            false
+        )) {
+            return $denied;
+        }
+
         $prediction->delete();
 
         return response()->json([

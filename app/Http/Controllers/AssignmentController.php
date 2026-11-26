@@ -67,16 +67,52 @@ class AssignmentController extends Controller
     {
         $this->authorizeVisible($assignment, $request, 'assignment');
         if ($request->user()->role === 'student') {
+            $student = $request->user()->student;
             $assignment->load([
                 'course',
                 'teacher',
                 'semester',
-                'submissions' => fn ($q) => $q->where('student_id', $request->user()->student->id),
+                'courseOffering',
+                'submissions' => fn ($q) => $q->where('student_id', $student->id)
+                    ->orderByDesc('version_number')
+                    ->orderByDesc('id'),
             ]);
             $fileService = app(\App\Services\SubmissionFileService::class);
             $assignment->submissions->each(fn ($sub) => $fileService->decorateStudentSubmissionModel($sub));
+
+            $perm = app(\App\Services\AssessmentReopenService::class)->evaluateAssignmentAccess($assignment, $student);
+            foreach ([
+                'assessment_type',
+                'original_deadline',
+                'extended_deadline',
+                'effective_deadline',
+                'student_submission_status',
+                'reopen_status',
+                'window_state',
+                'original_attempt_limit',
+                'additional_attempts',
+                'effective_attempt_limit',
+                'used_attempts',
+                'remaining_attempts',
+                'allow_submission',
+                'allow_late_submission',
+                'allow_resubmission',
+                'can_submit',
+                'can_resubmit',
+                'has_active_override',
+                'blocked_reason',
+                'override',
+            ] as $attr) {
+                $assignment->setAttribute($attr, $perm[$attr]);
+            }
         } else {
-            $assignment->load(['course', 'teacher', 'semester', 'submissions.student.user']);
+            $assignment->load([
+                'course',
+                'teacher',
+                'semester',
+                'submissions' => fn ($q) => $q->orderByDesc('version_number')->orderByDesc('id'),
+                'submissions.student.user',
+            ]);
         }
 
         return response()->json([

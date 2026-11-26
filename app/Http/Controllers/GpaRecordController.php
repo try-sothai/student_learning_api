@@ -3,22 +3,52 @@
 namespace App\Http\Controllers;
 
 use App\Models\GpaRecord;
+use App\Support\YearLevel;
 use Illuminate\Http\Request;
 
 class GpaRecordController extends Controller
 {
     public function index(Request $request)
     {
-        $query = GpaRecord::with(['student.user', 'semester']);
+        $user = $this->resolveApiUser($request);
+        if (! $user) {
+            return response()->json(['message' => 'Unauthenticated.'], 401);
+        }
 
-        $user = $request->user();
-        if ($user && $user->role === 'student') {
-            if (!$user->student) {
+        $query = GpaRecord::with(['student.user', 'student.classRoom.academicYear', 'semester.academicYear']);
+
+        if ($user->role === 'student') {
+            if (! $user->student) {
                 return response()->json(['message' => 'Student profile not found.'], 404);
             }
             $query->where('student_id', $user->student->id);
-        } elseif ($request->has('student_id')) {
-            $query->where('student_id', $request->student_id);
+        } elseif ($user->role === 'teacher') {
+            $teacher = $this->resolveTeacherForUser($user);
+            $authorizedIds = $teacher ? $this->teacherAuthService()->getAuthorizedStudentIds($teacher) : [];
+            if (empty($authorizedIds)) {
+                $query->whereRaw('1 = 0');
+            } else {
+                $query->whereIn('student_id', $authorizedIds);
+            }
+            if ($request->has('student_id')) {
+                $query->where('student_id', (int) $request->student_id);
+            }
+        } elseif ($user->role === 'admin') {
+            if ($request->has('student_id')) {
+                $query->where('student_id', $request->student_id);
+            }
+        } else {
+            return response()->json(['message' => 'Unauthorized action.'], 403);
+        }
+
+        if ($request->filled('academic_year_id')) {
+            $ayId = (int) $request->academic_year_id;
+            $query->whereHas('semester', fn ($q) => $q->where('academic_year_id', $ayId));
+        }
+
+        if ($request->filled('year_level') && strtolower((string) $request->query('year_level')) !== 'all') {
+            $yl = (string) $request->query('year_level');
+            $query->whereHas('student', fn ($sq) => strtolower($yl) === 'missing' ? $sq->missingYearLevel() : $sq->forYearLevel($yl));
         }
 
         if ($request->has('semester_id')) {
@@ -49,6 +79,10 @@ class GpaRecordController extends Controller
             'academic_standing' => 'nullable|string|max:50',
         ]);
 
+        if ($denied = $this->authorizeStudentScopedAccess($request, (int) $validated['student_id'], null, false)) {
+            return $denied;
+        }
+
         $record = GpaRecord::updateOrCreate(
             [
                 'student_id' => $validated['student_id'],
@@ -63,16 +97,10 @@ class GpaRecordController extends Controller
         ], 201);
     }
 
-    public function show(GpaRecord $gpaRecord)
+    public function show(Request $request, GpaRecord $gpaRecord)
     {
-        $user = request()->user();
-        if ($user && $user->role === 'student') {
-            if (!$user->student) {
-                return response()->json(['message' => 'Student profile not found.'], 404);
-            }
-            if ($gpaRecord->student_id !== $user->student->id) {
-                return response()->json(['message' => 'Unauthorized access.'], 403);
-            }
+        if ($denied = $this->authorizeStudentScopedAccess($request, (int) $gpaRecord->student_id)) {
+            return $denied;
         }
 
         return response()->json([
@@ -83,9 +111,8 @@ class GpaRecordController extends Controller
 
     public function update(Request $request, GpaRecord $gpaRecord)
     {
-        $user = $request->user();
-        if (!$user || !in_array($user->role, ['admin', 'teacher'])) {
-            return response()->json(['message' => 'Unauthorized action.'], 403);
+        if ($denied = $this->authorizeStudentScopedAccess($request, (int) $gpaRecord->student_id, null, false)) {
+            return $denied;
         }
 
         $validated = $request->validate([
@@ -103,11 +130,10 @@ class GpaRecordController extends Controller
         ], 200);
     }
 
-    public function destroy(GpaRecord $gpaRecord)
+    public function destroy(Request $request, GpaRecord $gpaRecord)
     {
-        $user = request()->user();
-        if (!$user || !in_array($user->role, ['admin', 'teacher'])) {
-            return response()->json(['message' => 'Unauthorized action.'], 403);
+        if ($denied = $this->authorizeStudentScopedAccess($request, (int) $gpaRecord->student_id, null, false)) {
+            return $denied;
         }
 
         $gpaRecord->delete();

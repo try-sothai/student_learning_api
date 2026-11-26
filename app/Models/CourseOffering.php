@@ -2,6 +2,9 @@
 
 namespace App\Models;
 
+use App\Support\YearLevel;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -26,11 +29,48 @@ class CourseOffering extends Model
         'status',
     ];
 
+    protected $appends = ['year_level', 'year_level_code', 'year_level_name', 'year_level_khmer', 'year_level_label'];
+
     protected function casts(): array
     {
         return [
             'study_year' => 'integer',
         ];
+    }
+
+    protected function yearLevel(): Attribute
+    {
+        return Attribute::get(fn () => $this->study_year ? (int) $this->study_year : null);
+    }
+
+    protected function yearLevelCode(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::code($this->study_year));
+    }
+
+    protected function yearLevelName(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::name($this->study_year));
+    }
+
+    protected function yearLevelKhmer(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::khmer($this->study_year));
+    }
+
+    protected function yearLevelLabel(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::label($this->study_year));
+    }
+
+    public function scopeForYearLevel(Builder $query, mixed $yearLevel): Builder
+    {
+        $parsed = YearLevel::parse($yearLevel);
+        if ($parsed === null) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        return $query->where('study_year', $parsed);
     }
 
     public function course(): BelongsTo

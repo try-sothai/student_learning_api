@@ -54,15 +54,38 @@ class SemesterController extends Controller
     public function update(Request $request, Semester $semester)
     {
         $validated = $request->validate([
-            'academic_year_id' => 'required|integer|exists:academic_years,id',
-            'name' => 'required|string|max:100',
-            'semester_number' => 'required|integer|min:1|max:10',
-            'start_date' => 'required|date',
-            'end_date' => 'required|date|after:start_date',
+            'academic_year_id' => 'sometimes|required|integer|exists:academic_years,id',
+            'name' => 'sometimes|required|string|max:100',
+            'semester_number' => 'sometimes|required|integer|min:1|max:10',
+            'start_date' => 'sometimes|required|date',
+            'end_date' => 'sometimes|required|date|after:start_date',
             'status' => 'nullable|string|in:active,upcoming,completed,inactive',
+            'reason' => 'nullable|string|max:500',
         ]);
 
-        $semester->update($validated);
+        $prevStart = $semester->start_date?->toDateString();
+        $prevEnd = $semester->end_date?->toDateString();
+        $prevStatus = $semester->status;
+
+        $semester->update(collect($validated)->except('reason')->all());
+
+        if (\Illuminate\Support\Facades\Schema::hasTable('academic_calendar_audits')) {
+            $newStart = $semester->start_date?->toDateString();
+            $newEnd = $semester->end_date?->toDateString();
+            if ($prevStart !== $newStart || $prevEnd !== $newEnd || $prevStatus !== $semester->status) {
+                \App\Models\AcademicCalendarAudit::create([
+                    'semester_id' => $semester->id,
+                    'previous_start_date' => $prevStart,
+                    'new_start_date' => $newStart,
+                    'previous_end_date' => $prevEnd,
+                    'new_end_date' => $newEnd,
+                    'previous_status' => $prevStatus,
+                    'new_status' => $semester->status,
+                    'changed_by' => $request->user()?->id,
+                    'reason' => $validated['reason'] ?? 'Semester calendar dates updated.',
+                ]);
+            }
+        }
 
         return response()->json([
             'message' => 'Semester updated successfully.',

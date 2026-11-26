@@ -27,7 +27,17 @@ class Assignment extends Model
         'assignment_type',
         'allow_retakes',
         'max_attempts',
+        'allow_late_submission',
+        'allow_resubmission',
+        'reopened_at',
+        'reopened_until',
+        'reopened_by',
         'status',
+    ];
+
+    protected $attributes = [
+        'allow_late_submission' => false,
+        'allow_resubmission' => false,
     ];
 
     protected function casts(): array
@@ -38,6 +48,11 @@ class Assignment extends Model
             'starts_at' => 'datetime',
             'ends_at' => 'datetime',
             'allow_retakes' => 'boolean',
+            'max_attempts' => 'integer',
+            'allow_late_submission' => 'boolean',
+            'allow_resubmission' => 'boolean',
+            'reopened_at' => 'datetime',
+            'reopened_until' => 'datetime',
         ];
     }
 
@@ -96,5 +111,20 @@ class Assignment extends Model
     public function submissions(): HasMany
     {
         return $this->hasMany(AssignmentSubmission::class);
+    }
+
+    public function latestSubmissions(): HasMany
+    {
+        return $this->hasMany(AssignmentSubmission::class)->where('is_latest', true);
+    }
+
+    public function reopenedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'reopened_by');
+    }
+
+    public function canonicalAssessmentType(): string
+    {
+        return strtolower((string) $this->assignment_type) === 'homework' ? 'homework' : 'assignment';
     }
 }

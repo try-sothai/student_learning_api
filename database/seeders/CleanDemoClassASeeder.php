@@ -260,7 +260,7 @@ class CleanDemoClassASeeder extends Seeder
                         'gender' => $existingStudent?->gender ?? 'Male',
                         'nationality' => $existingStudent?->nationality ?? 'Cambodian',
                         'major' => 'Computer Science',
-                        'year_level' => 'Year 1',
+                        'year_level' => '1',
                         'enrollment_date' => '2026-09-01',
                         'status' => 'enrolled',
                         'deleted_at' => null,

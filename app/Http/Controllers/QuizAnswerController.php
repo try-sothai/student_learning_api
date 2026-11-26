@@ -32,13 +32,20 @@ class QuizAnswerController extends Controller
             'answer' => 'required|string',
         ]);
 
-        $question = QuizQuestion::find($validated['question_id']);
-        $isCorrect = false;
-        $marksObtained = 0.0;
+        $question = QuizQuestion::withTrashed()->find($validated['question_id']);
+        $isShort = $question && in_array(strtolower((string) $question->question_type), ['short_answer', 'essay'], true);
 
-        if ($question && strtoupper(trim($validated['answer'])) === strtoupper(trim($question->correct_answer))) {
-            $isCorrect = true;
-            $marksObtained = (float) $question->marks;
+        $isCorrect = null;
+        $marksObtained = null;
+        $gradingStatus = 'pending_grading';
+
+        if (! $isShort && $question) {
+            $question->makeVisible('correct_answer');
+            $given = strtoupper(trim($validated['answer']));
+            $key = strtoupper(trim((string) $question->correct_answer));
+            $isCorrect = $given !== '' && $key !== '' && $given === $key;
+            $marksObtained = $isCorrect ? (float) $question->marks : 0.0;
+            $gradingStatus = 'auto_graded';
         }
 
         $quizAnswer = QuizAnswer::updateOrCreate(
@@ -50,6 +57,7 @@ class QuizAnswerController extends Controller
                 'answer' => $validated['answer'],
                 'is_correct' => $isCorrect,
                 'marks_obtained' => $marksObtained,
+                'grading_status' => $gradingStatus,
             ]
         );
 
@@ -70,9 +78,11 @@ class QuizAnswerController extends Controller
     public function update(Request $request, QuizAnswer $quizAnswer)
     {
         $validated = $request->validate([
-            'answer' => 'required|string',
+            'answer' => 'sometimes|required|string',
             'is_correct' => 'nullable|boolean',
             'marks_obtained' => 'nullable|numeric|min:0',
+            'teacher_feedback' => 'nullable|string',
+            'grading_status' => 'nullable|string|in:auto_graded,pending_grading,graded',
         ]);
 
         $quizAnswer->update($validated);

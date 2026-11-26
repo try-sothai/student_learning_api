@@ -25,27 +25,41 @@
 <div class="card portal-card border-0">
     <div class="card-body p-4 pb-3 d-flex flex-wrap justify-content-between align-items-center gap-3">
         <h2 class="h5 fw-bold mb-0">Assigned student roster</h2>
-        <form class="d-flex gap-2" method="GET" action="{{ route('teacher.students') }}" role="search">
+        <form class="d-flex flex-wrap gap-2" method="GET" action="{{ route('teacher.students') }}" role="search">
             <label class="visually-hidden" for="studentSearch">Search students</label>
-            <input class="form-control" id="studentSearch" name="search" value="{{ $search }}" placeholder="Search name, student ID, or class" maxlength="100">
+            <input class="form-control" id="studentSearch" name="search" value="{{ $search }}" placeholder="Search name, student ID, or class" maxlength="100" style="min-width: 210px;">
+            <label class="visually-hidden" for="teacherStudentYearLevel">Year level</label>
+            <select class="form-select" id="teacherStudentYearLevel" name="year_level" style="width: auto;">
+                <option value="">{{ __('All year levels') }}</option>
+                @foreach(($yearLevelOptions ?? \App\Support\YearLevel::options()) as $yl)
+                    <option value="{{ $yl['code'] }}" @selected(strtoupper((string) ($yearLevelFilter ?? '')) === $yl['code'] || (string) ($yearLevelFilter ?? '') === (string) $yl['number'])>{{ $yl['label'] }}</option>
+                @endforeach
+                <option value="missing" @selected(($yearLevelFilter ?? '') === 'missing')>{{ __('Missing Year Level') }}</option>
+            </select>
             <button class="btn btn-outline-primary" type="submit"><i class="bi bi-search me-1"></i>Find</button>
-            @if($search !== '')<a class="btn btn-outline-secondary" href="{{ route('teacher.students') }}" aria-label="Clear search" title="Clear search"><i class="bi bi-x-lg"></i></a>@endif
+            @if($search !== '' || !empty($yearLevelFilter))<a class="btn btn-outline-secondary" href="{{ route('teacher.students') }}" aria-label="Clear search" title="Clear search"><i class="bi bi-x-lg"></i></a>@endif
         </form>
     </div>
     <div class="table-responsive">
         <table class="table portal-table align-middle mb-0">
-            <thead><tr><th class="ps-4">Student</th><th>Student ID</th><th>Assigned courses</th><th>Status</th><th class="text-end pe-4">Actions</th></tr></thead>
+            <thead><tr><th class="ps-4">Student</th><th>Student ID</th><th>Year Level</th><th>Assigned courses</th><th>Status</th><th class="text-end pe-4">Actions</th></tr></thead>
             <tbody>
                 @forelse($managementRows as $row)
                     <tr>
-                        <td class="ps-4 fw-semibold">{{ $row[0] }}</td>
+                        <td class="ps-4">
+                            <div class="fw-semibold">{{ $row[0] }}</div>
+                            @if(!empty($row['academic_year']) || !empty($row['class_code']))
+                                <small class="text-muted">{{ $row['class_code'] ?? '' }}{{ !empty($row['class_code']) && !empty($row['academic_year']) ? ' · ' : '' }}{{ $row['academic_year'] ?? '' }}</small>
+                            @endif
+                        </td>
                         <td>{{ $row[1] }}</td>
+                        <td><span class="badge {{ !empty($row['year_level_code']) ? 'bg-primary-subtle text-primary' : 'bg-warning-subtle text-warning-emphasis' }} rounded-pill">{{ $row['year_level_code'] ?? __('Unassigned') }}</span></td>
                         <td>{{ $row[2] }}</td>
                         <td><span class="badge portal-badge rounded-pill">{{ $row[3] }}</span></td>
                         <td class="text-end pe-4"><a class="btn btn-sm btn-outline-primary" href="{{ route('teacher.students.show', $row[4]) }}" aria-label="View {{ $row[0] }}" title="View student"><i class="bi bi-eye"></i></a></td>
                     </tr>
                 @empty
-                    <tr><td colspan="5" class="text-center text-muted py-5">{{ $search !== '' ? 'No assigned students match your search.' : 'No students are enrolled in your assigned classes yet.' }}</td></tr>
+                    <tr><td colspan="6" class="text-center text-muted py-5">{{ ($search !== '' || !empty($yearLevelFilter)) ? 'No assigned students match your search.' : 'No students are enrolled in your assigned classes yet.' }}</td></tr>
                 @endforelse
             </tbody>
         </table>

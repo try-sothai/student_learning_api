@@ -17,11 +17,12 @@
         <dl class="row mb-0">
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Student ID</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $student->student_id }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Email</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $student->user?->email ?? 'Not set' }}</dd>
-            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Department</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $student->department ?: 'Not set' }}</dd>
-            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Major</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $student->major ?: 'Not set' }}</dd>
-            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Academic year</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $student->academic_year ?: 'Not set' }}</dd>
-            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Year level</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $student->year_level ?: 'Not set' }}</dd>
-            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Semester</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $student->semester ?: 'Not set' }}</dd>
+            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Faculty</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $student->department?->name ?? 'Not set' }}</dd>
+            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Major</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $student->program?->name ?? ($student->major ?: 'Not set') }}</dd>
+            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Class</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $student->classRoom?->code ?? $student->classRoom?->name ?? 'Not set' }}</dd>
+            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Academic year</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $student->resolveAcademicYearName() ?? 'Not set' }}</dd>
+            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Year level</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0"><span class="badge {{ $student->year_level_code ? 'bg-primary-subtle text-primary' : 'bg-warning-subtle text-warning-emphasis' }} rounded-pill">{{ $student->year_level_label ?? ($student->year_level ?: 'Not set') }}</span></dd>
+            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Semester</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $student->resolveSemesterName() ?? 'Not set' }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Status</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ ucfirst($student->status) }}</dd>
         </dl>
     </div>
@@ -31,12 +32,13 @@
     <div class="card-body p-4 pb-3"><h2 class="h5 fw-bold mb-0">Your assigned classes</h2></div>
     <div class="table-responsive">
         <table class="table portal-table align-middle mb-0">
-            <thead><tr><th class="ps-4">Course</th><th>Code</th><th>Academic year</th><th class="pe-4">Semester</th></tr></thead>
+            <thead><tr><th class="ps-4">Course</th><th>Code</th><th>Year level</th><th>Academic year</th><th class="pe-4">Semester</th></tr></thead>
             <tbody>
                 @forelse($student->courses as $course)
-                    <tr><td class="ps-4 fw-semibold">{{ $course->name }}</td><td>{{ $course->code }}</td><td>{{ $course->pivot->academic_year ?: 'Not set' }}</td><td class="pe-4">{{ $course->pivot->semester ?: 'Not set' }}</td></tr>
+                    @php($pivotYear = \App\Support\YearLevel::code($course->pivot->year_level ?? $course->year_level))
+                    <tr><td class="ps-4 fw-semibold">{{ $course->name }}</td><td>{{ $course->code }}</td><td><span class="badge bg-info-subtle text-info-emphasis rounded-pill">{{ $pivotYear ?? __('Cross-year') }}</span></td><td>{{ $course->academic_year ?: ($student->resolveAcademicYearName() ?? 'Not set') }}</td><td class="pe-4">{{ $course->semester ?: ($student->resolveSemesterName() ?? 'Not set') }}</td></tr>
                 @empty
-                    <tr><td colspan="4" class="text-center text-muted py-4">No assigned classes found.</td></tr>
+                    <tr><td colspan="5" class="text-center text-muted py-4">No assigned classes found.</td></tr>
                 @endforelse
             </tbody>
         </table>

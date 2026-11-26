@@ -17,10 +17,11 @@
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Course name</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $course->name }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Course code</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $course->code }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Description</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $course->description ?: 'Not set' }}</dd>
-            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Department</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $course->department ?: 'Not set' }}</dd>
+            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Faculty</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $course->departmentRelation?->name ?? ($course->getAttributes()['department'] ?? null) ?: 'Not set' }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Credits</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $course->credits ?? 'Not set' }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Teacher</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $course->teacher?->user?->name ?? 'Not set' }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Academic year</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $course->academic_year ?: 'Not set' }}</dd>
+            <dt class="col-sm-4 col-lg-3 py-2 text-muted">Student year level</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0"><span class="badge bg-info-subtle text-info-emphasis rounded-pill">{{ $course->year_level_label ?? __('Cross-year / All levels') }}</span></dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Semester</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $course->semester ?: 'Not set' }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Class schedule</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ $course->day_of_week ? $course->day_of_week . ' · ' : '' }}{{ $course->start_time ? \Carbon\Carbon::parse($course->start_time)->format('H:i') : 'Not set' }}{{ $course->end_time ? ' - ' . \Carbon\Carbon::parse($course->end_time)->format('H:i') : '' }}{{ $course->room ? ' · ' . $course->room : '' }}{{ !$course->day_of_week && !$course->start_time && !$course->end_time && !$course->room ? '' : '' }}</dd>
             <dt class="col-sm-4 col-lg-3 py-2 text-muted">Status</dt><dd class="col-sm-8 col-lg-9 py-2 mb-0">{{ ucfirst($course->status) }}</dd>

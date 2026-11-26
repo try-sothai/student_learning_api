@@ -36,12 +36,13 @@
     @else
         <div class="table-responsive">
             <table class="table portal-table align-middle mb-0">
-                <thead><tr><th class="ps-4">Class</th><th>Code</th><th>Enrolled</th><th>Attendance</th><th>Present or late</th><th>Absent</th><th class="pe-4">Assignments</th></tr></thead>
+                <thead><tr><th class="ps-4">Class</th><th>Code</th><th>Year level</th><th>Enrolled</th><th>Attendance</th><th>Present or late</th><th>Absent</th><th class="pe-4">Assignments</th></tr></thead>
                 <tbody>
                     @foreach($reportRows as $row)
                         <tr>
                             <td class="ps-4 fw-semibold">{{ $row['name'] }}</td>
                             <td>{{ $row['code'] }}</td>
+                            <td><span class="badge bg-info-subtle text-info-emphasis rounded-pill">{{ $row['year_level_code'] ?? __('Cross-year') }}</span></td>
                             <td>{{ $row['enrolled'] }} enrolled</td>
                             <td>{{ $row['attendance_rate'] }}</td>
                             <td>{{ $row['attended'] }}</td>

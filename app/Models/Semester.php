@@ -29,6 +29,19 @@ class Semester extends Model
         ];
     }
 
+    protected static function booted(): void
+    {
+        static::saving(function (self $semester) {
+            if ($semester->semester_number === null) {
+                if (preg_match('/(\d+)/', (string) $semester->name, $m)) {
+                    $semester->semester_number = (int) $m[1];
+                } else {
+                    $semester->semester_number = 1;
+                }
+            }
+        });
+    }
+
     public function academicYear(): BelongsTo
     {
         return $this->belongsTo(AcademicYear::class);

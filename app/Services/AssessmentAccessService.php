@@ -7,6 +7,7 @@ use App\Models\CourseOffering;
 use App\Models\Student;
 use App\Models\Teacher;
 use App\Models\User;
+use App\Support\YearLevel;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 
@@ -126,6 +127,7 @@ class AssessmentAccessService
             ->get()
             ->map(function (CourseOffering $o) {
                 $ay = $o->academicYear ?? $o->semester?->academicYear;
+                $yl = YearLevel::parse($o->study_year ?? $o->classRoom?->year_level ?? $o->course?->year_level);
 
                 return [
                     'course_offering_id' => $o->id,
@@ -136,6 +138,9 @@ class AssessmentAccessService
                     'class_id' => $o->class_id,
                     'class_name' => $o->classRoom?->name ?? $o->section_name,
                     'class_code' => $o->classRoom?->code,
+                    'year_level' => $yl,
+                    'year_level_code' => YearLevel::code($yl),
+                    'year_level_label' => YearLevel::label($yl),
                     'course_id' => $o->course_id,
                     'course_name' => $o->course?->name,
                     'course_code' => $o->course?->code,

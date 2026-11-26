@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Student;
 use App\Models\User;
+use App\Support\YearLevel;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -55,6 +56,12 @@ class StudentImportValidationService
             $this->departments['bus'] ??= $this->departments['ba'];
             $this->departments['business'] ??= $this->departments['ba'];
             $this->departments['bba'] ??= $this->departments['ba'];
+            $this->departments['fba'] ??= $this->departments['ba'];
+        } elseif (isset($this->departments['fba'])) {
+            $this->departments['ba'] ??= $this->departments['fba'];
+            $this->departments['bus'] ??= $this->departments['fba'];
+            $this->departments['business'] ??= $this->departments['fba'];
+            $this->departments['bba'] ??= $this->departments['fba'];
         }
         if (isset($this->departments['cs'])) {
             $this->departments['comp'] ??= $this->departments['cs'];
@@ -63,6 +70,16 @@ class StudentImportValidationService
         if (isset($this->departments['it'])) {
             $this->departments['info'] ??= $this->departments['it'];
             $this->departments['bsit'] ??= $this->departments['it'];
+        }
+        if (isset($this->departments['fosat'])) {
+            $this->departments['cs'] ??= $this->departments['fosat'];
+            $this->departments['it'] ??= $this->departments['fosat'];
+            $this->departments['ds'] ??= $this->departments['fosat'];
+            $this->departments['se'] ??= $this->departments['fosat'];
+            $this->departments['comp'] ??= $this->departments['fosat'];
+            $this->departments['info'] ??= $this->departments['fosat'];
+            $this->departments['bscs'] ??= $this->departments['fosat'];
+            $this->departments['bsit'] ??= $this->departments['fosat'];
         }
 
         $this->programs = [];
@@ -156,10 +173,12 @@ class StudentImportValidationService
             }
         }
         if (empty($raw['department_code'])) {
-            $raw['department_code'] = $raw['department'] ?? $raw['dept_code'] ?? $raw['dept'] ?? $raw['department_name'] ?? '';
+            $raw['department_code'] = $raw['department'] ?? $raw['dept_code'] ?? $raw['dept'] ?? $raw['department_name']
+                ?? $raw['faculty_code'] ?? $raw['faculty'] ?? $raw['faculty_name'] ?? '';
         }
         if (empty($raw['program_code'])) {
-            $raw['program_code'] = $raw['program'] ?? $raw['prog_code'] ?? $raw['prog'] ?? $raw['program_name'] ?? $raw['major'] ?? '';
+            $raw['program_code'] = $raw['program'] ?? $raw['prog_code'] ?? $raw['prog'] ?? $raw['program_name']
+                ?? $raw['major_code'] ?? $raw['major_name'] ?? $raw['major'] ?? '';
         }
         if (empty($raw['emergency_relationship']) && ! empty($raw['emergency_contact_relationship'])) {
             $raw['emergency_relationship'] = $raw['emergency_contact_relationship'];
@@ -170,6 +189,9 @@ class StudentImportValidationService
         if (empty($raw['semester_code']) && ! empty($raw['semester'])) {
             $raw['semester_code'] = $raw['semester'];
         }
+        if (empty($raw['year_level'])) {
+            $raw['year_level'] = $raw['student_year_level'] ?? $raw['study_year'] ?? '';
+        }
 
         $row = [];
         foreach (self::COLUMNS as $col) {
@@ -177,8 +199,11 @@ class StudentImportValidationService
             $row[$col] = is_string($v) ? trim($v) : (is_null($v) ? '' : trim((string) $v));
         }
 
-        if ($row['year_level'] !== '' && preg_match('/^year\s*(\d+)$/i', $row['year_level'], $m)) {
-            $row['year_level'] = $m[1];
+        if ($row['year_level'] !== '') {
+            $parsedYl = YearLevel::parse($row['year_level'], 99);
+            if ($parsedYl !== null) {
+                $row['year_level'] = (string) $parsedYl;
+            }
         }
 
         return $row;
@@ -248,7 +273,7 @@ class StudentImportValidationService
         if ($row['department_code'] !== '') {
             $departmentId = $this->departments[mb_strtolower(trim($row['department_code']))] ?? null;
             if (! $departmentId) {
-                $errors[] = "Unknown department_code '{$row['department_code']}'";
+                $errors[] = "Unknown faculty (department_code) '{$row['department_code']}'";
             }
         }
 
@@ -256,9 +281,9 @@ class StudentImportValidationService
         if ($row['program_code'] !== '') {
             $program = $this->programs[mb_strtolower(trim($row['program_code']))] ?? null;
             if (! $program) {
-                $errors[] = "Unknown program_code '{$row['program_code']}'";
+                $errors[] = "Unknown major (program_code) '{$row['program_code']}'";
             } elseif ($departmentId && ! $this->isProgramCompatibleWithDepartment($program, (int) $departmentId)) {
-                $errors[] = 'program_code does not belong to the given department_code';
+                $errors[] = 'Selected major (program_code) does not belong to the selected faculty (department_code)';
             } else {
                 $programId = $program->id;
             }
@@ -273,14 +298,19 @@ class StudentImportValidationService
 
         $yearLevel = null;
         if ($row['year_level'] !== '') {
-            if (! ctype_digit($row['year_level']) || (int) $row['year_level'] < 1) {
-                $errors[] = 'Invalid year_level (positive whole number)';
+            if (preg_match('/^\d{4}\s*[-–]\s*\d{4}$/u', trim((string) $row['year_level']))) {
+                $errors[] = 'Invalid year_level (use Y1-Y4 or 1-4, not academic_year_code)';
             } else {
-                $yearLevel = (int) $row['year_level'];
-                $max = $program->duration_years ?? 8;
-                if ($yearLevel > $max) {
-                    $errors[] = "year_level exceeds program duration ({$max} years)";
-                    $yearLevel = null;
+                $parsedYl = YearLevel::parse($row['year_level'], 99);
+                if ($parsedYl === null || $parsedYl < 1) {
+                    $errors[] = 'Invalid year_level (use Y1-Y4 or 1-4)';
+                } else {
+                    $max = (int) ($program->duration_years ?? config('slas.max_year_level', 4));
+                    if ($parsedYl > $max) {
+                        $errors[] = "year_level exceeds major duration ({$max} years)";
+                    } else {
+                        $yearLevel = $parsedYl;
+                    }
                 }
             }
         }
@@ -306,6 +336,23 @@ class StudentImportValidationService
         ];
 
         return ['errors' => $errors, 'data' => $data];
+    }
+
+    public static function areDepartmentAndProgramCompatible(int $programDepartmentId, int $departmentId): bool
+    {
+        if ($programDepartmentId === $departmentId) {
+            return true;
+        }
+
+        $codes = DB::table('departments')
+            ->whereIn('id', [$departmentId, $programDepartmentId])
+            ->pluck('code', 'id');
+
+        $deptCode = strtoupper(trim((string) ($codes[$departmentId] ?? '')));
+        $progDeptCode = strtoupper(trim((string) ($codes[$programDepartmentId] ?? '')));
+        $computingDepts = ['CS', 'IT'];
+
+        return in_array($deptCode, $computingDepts, true) && in_array($progDeptCode, $computingDepts, true);
     }
 
     private function isProgramCompatibleWithDepartment(object $program, int $departmentId): bool

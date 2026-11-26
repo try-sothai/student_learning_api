@@ -1,0 +1,235 @@
+{
+    "dry_run": true,
+    "changed": true,
+    "before": {
+        "departments": 5,
+        "programs": 8,
+        "students": 1,
+        "teachers": 3,
+        "classes": 22,
+        "class_schedules": 2,
+        "courses": 11,
+        "course_offerings": 85,
+        "course_enrollments": 5,
+        "assignments": 2,
+        "quizzes": 5,
+        "exams": 2,
+        "attendance": 2,
+        "grades": 0,
+        "incidents": 0,
+        "specializations": 15
+    },
+    "faculties": [
+        {
+            "action": "normalised",
+            "id": 14,
+            "from": {
+                "name": "Faculty Of Science And Technology",
+                "code": "FOSAT",
+                "status": "active"
+            },
+            "to": {
+                "name": "Faculty of Science and Technology",
+                "code": "FOSAT"
+            }
+        },
+        {
+            "action": "created",
+            "id": 15,
+            "code": "FBA",
+            "name": "Faculty of Business Administration"
+        }
+    ],
+    "majors": [
+        {
+            "action": "existing_major_matched",
+            "id": 5,
+            "code": "CS",
+            "name": "Computer Science",
+            "faculty_id": 14,
+            "source_department_id": 1
+        },
+        {
+            "action": "existing_major_matched",
+            "id": 7,
+            "code": "IT",
+            "name": "Information Technology",
+            "faculty_id": 14,
+            "source_department_id": 2
+        },
+        {
+            "action": "existing_major_matched",
+            "id": 8,
+            "code": "BA",
+            "name": "Business Administration",
+            "faculty_id": 15,
+            "source_department_id": 3
+        },
+        {
+            "action": "created_from_department",
+            "id": 9,
+            "code": "DS",
+            "name": "Data Science",
+            "faculty_id": 14,
+            "source_department_id": 4
+        }
+    ],
+    "courses_linked": [
+        {
+            "major_code": "CS",
+            "major_id": 5,
+            "courses": 5,
+            "newly_linked": 5
+        },
+        {
+            "major_code": "IT",
+            "major_id": 7,
+            "courses": 5,
+            "newly_linked": 5
+        },
+        {
+            "major_code": "DS",
+            "major_id": 9,
+            "courses": 1,
+            "newly_linked": 1
+        }
+    ],
+    "repointed": [
+        {
+            "table": "class_schedules",
+            "from_department_id": 1,
+            "to_faculty_id": 14,
+            "rows": 2
+        },
+        {
+            "table": "classes",
+            "from_department_id": 1,
+            "to_faculty_id": 14,
+            "rows": 9
+        },
+        {
+            "table": "classes",
+            "from_department_id": 2,
+            "to_faculty_id": 14,
+            "rows": 6
+        },
+        {
+            "table": "classes",
+            "from_department_id": 3,
+            "to_faculty_id": 15,
+            "rows": 7
+        },
+        {
+            "table": "courses",
+            "from_department_id": 1,
+            "to_faculty_id": 14,
+            "rows": 5
+        },
+        {
+            "table": "courses",
+            "from_department_id": 2,
+            "to_faculty_id": 14,
+            "rows": 5
+        },
+        {
+            "table": "courses",
+            "from_department_id": 4,
+            "to_faculty_id": 14,
+            "rows": 1
+        },
+        {
+            "table": "programs",
+            "from_department_id": 1,
+            "to_faculty_id": 14,
+            "rows": 3
+        },
+        {
+            "table": "programs",
+            "from_department_id": 2,
+            "to_faculty_id": 14,
+            "rows": 1
+        },
+        {
+            "table": "programs",
+            "from_department_id": 3,
+            "to_faculty_id": 15,
+            "rows": 1
+        },
+        {
+            "table": "students",
+            "from_department_id": 1,
+            "to_faculty_id": 14,
+            "rows": 1
+        },
+        {
+            "table": "teachers",
+            "from_department_id": 1,
+            "to_faculty_id": 14,
+            "rows": 1
+        },
+        {
+            "table": "teachers",
+            "from_department_id": 2,
+            "to_faculty_id": 14,
+            "rows": 1
+        }
+    ],
+    "deactivated_majors": [
+        {
+            "id": 1,
+            "code": "BSCS",
+            "duplicate_of": "CS"
+        },
+        {
+            "id": 2,
+            "code": "BSE",
+            "duplicate_of": "SE"
+        },
+        {
+            "id": 3,
+            "code": "BSIT",
+            "duplicate_of": "IT"
+        }
+    ],
+    "deleted_departments": [
+        {
+            "id": 1,
+            "code": "CS",
+            "name": "Computer Science"
+        },
+        {
+            "id": 2,
+            "code": "IT",
+            "name": "Information Technology"
+        },
+        {
+            "id": 3,
+            "code": "BA",
+            "name": "Business Administration"
+        },
+        {
+            "id": 4,
+            "code": "DS",
+            "name": "Data Science"
+        }
+    ],
+    "warnings": [],
+    "after": {
+        "departments": 2,
+        "programs": 9,
+        "students": 1,
+        "teachers": 3,
+        "classes": 22,
+        "class_schedules": 2,
+        "courses": 11,
+        "course_offerings": 85,
+        "course_enrollments": 5,
+        "assignments": 2,
+        "quizzes": 5,
+        "exams": 2,
+        "attendance": 2,
+        "grades": 0,
+        "incidents": 0,
+        "specializations": 15
+    }
+}

@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use App\Support\YearLevel;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -16,6 +18,8 @@ class Course extends Model
 
     protected $fillable = [
         'department_id',
+        'course_category_id',
+        'year_level',
         'teacher_id',
         'name',
         'code',
@@ -34,14 +38,48 @@ class Course extends Model
         'status',
     ];
 
-    protected $appends = ['course_code', 'course_name', 'code', 'name', 'credits'];
+    protected $appends = ['course_code', 'course_name', 'code', 'name', 'credits', 'year_level_code', 'year_level_name', 'year_level_khmer', 'year_level_label'];
 
     protected function casts(): array
     {
         return [
+            'year_level' => 'integer',
             'credit' => 'float',
             'credits' => 'float',
         ];
+    }
+
+    protected function yearLevelCode(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::code($this->year_level));
+    }
+
+    protected function yearLevelName(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::name($this->year_level));
+    }
+
+    protected function yearLevelKhmer(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::khmer($this->year_level));
+    }
+
+    protected function yearLevelLabel(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::label($this->year_level));
+    }
+
+    public function scopeForYearLevel(Builder $query, mixed $yearLevel): Builder
+    {
+        $parsed = YearLevel::parse($yearLevel);
+        if ($parsed === null) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        return $query->where(function (Builder $q) use ($parsed) {
+            $q->where('year_level', $parsed)
+                ->orWhereHas('offerings', fn (Builder $oq) => $oq->where('study_year', $parsed));
+        });
     }
 
     protected function courseCode(): Attribute
@@ -107,6 +145,18 @@ class Course extends Model
     public function departmentRelation(): BelongsTo
     {
         return $this->belongsTo(Department::class, 'department_id');
+    }
+
+    /** Course Category (type of course) - separate from Faculty and Major. */
+    public function category(): BelongsTo
+    {
+        return $this->belongsTo(CourseCategory::class, 'course_category_id');
+    }
+
+    /** Majors this course is assigned to (shared courses belong to several). */
+    public function programs(): BelongsToMany
+    {
+        return $this->belongsToMany(Program::class, 'course_program')->withTimestamps();
     }
 
     public function teacher(): BelongsTo

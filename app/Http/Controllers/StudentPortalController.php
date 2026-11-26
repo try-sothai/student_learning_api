@@ -25,7 +25,13 @@ class StudentPortalController extends Controller
 {
     private function currentStudent(): ?Student
     {
-        return Student::where('user_id', Auth::id())->first();
+        return Student::with([
+            'user',
+            'department',
+            'classRoom.academicYear',
+            'program',
+            'courseEnrollments.semester.academicYear',
+        ])->where('user_id', Auth::id())->first();
     }
 
     private function enrolledCourseIds(?Student $student): \Illuminate\Support\Collection
@@ -202,6 +208,7 @@ class StudentPortalController extends Controller
         $insights = $this->buildInsights($overallGpa, $attendanceSummary['rate'], $gradedAttempts->avg('score'));
 
         return view('pages.student.analytics.index', [
+            'studentProfile' => $student,
             'overallGpa' => $overallGpa,
             'attendanceRate' => $attendanceSummary['rate'],
             'assignmentsDone' => $attemptCounts->count(),
@@ -415,6 +422,7 @@ class StudentPortalController extends Controller
         ];
 
         return view('pages.student.reports.index', [
+            'studentProfile' => $student,
             'courseRows' => $courseRows,
             'summary' => $summary,
             'overallGpa' => $overallGpa,

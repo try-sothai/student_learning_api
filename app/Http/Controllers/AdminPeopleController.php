@@ -2,34 +2,54 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AcademicYear;
+use App\Models\ClassRoom;
 use App\Models\Department;
+use App\Models\Program;
 use App\Models\Specialization;
 use App\Models\Student;
 use App\Models\Teacher;
+use App\Rules\ValidYearLevel;
 use App\Services\AcademicProfileResolver;
+use App\Services\StudentImportValidationService;
 use App\Services\TeacherProfileService;
+use App\Support\YearLevel;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 
 class AdminPeopleController extends Controller
 {
     public function showStudent(Student $student): View
     {
-        $student->load('user', 'department');
+        $student->load([
+            'user',
+            'department',
+            'classRoom.academicYear',
+            'program',
+            'courseEnrollments.semester.academicYear',
+        ]);
+
+        $classLabel = $student->classRoom
+            ? trim(($student->classRoom->code ?? $student->classRoom->name)
+                . ($student->classRoom->year_level_code ? ' (' . $student->classRoom->year_level_code . ')' : ''))
+            : 'Not set';
 
         return $this->showRecord('Student', $student, [
             'Student ID' => $student->student_id,
             'Name' => $student->user?->name ?? trim($student->first_name . ' ' . $student->last_name),
             'Email' => $student->user?->email ?? 'Not set',
-            'Department' => $student->department?->name ?? 'Not set',
-            'Major' => $student->major,
-            'Academic year' => $student->academic_year,
-            'Year level' => $student->year_level,
-            'Semester' => $student->semester,
+            'Faculty' => $student->department?->name ?? 'Not set',
+            'Major' => $student->program?->name ?? ($student->major ?: 'Not set'),
+            'Class' => $classLabel,
+            'Academic year' => $student->resolveAcademicYearName() ?? 'Not set',
+            'Year level' => $student->year_level_label ?? ($student->year_level ?: 'Not set'),
+            'Semester' => $student->resolveSemesterName() ?? 'Not set',
             'Enrollment date' => $student->enrollment_date,
             'Status' => $student->status,
         ], route('admin.students'), route('admin.students.edit', $student), route('admin.students.destroy', $student));
@@ -37,7 +57,37 @@ class AdminPeopleController extends Controller
 
     public function editStudent(Student $student): View
     {
-        $student->load('user', 'department');
+        $student->load([
+            'user',
+            'department',
+            'classRoom.academicYear',
+            'program',
+            'courseEnrollments.semester.academicYear',
+        ]);
+
+        $academicYearOptions = AcademicYear::query()
+            ->orderByDesc('name')
+            ->pluck('name', 'name')
+            ->all();
+
+        $classOptions = ClassRoom::query()
+            ->with('academicYear:id,name')
+            ->orderBy('year_level')
+            ->orderBy('code')
+            ->get()
+            ->mapWithKeys(function (ClassRoom $classRoom) {
+                $label = trim(
+                    ($classRoom->code ?? $classRoom->name)
+                    . ($classRoom->year_level_code ? ' (' . $classRoom->year_level_code : '')
+                    . ($classRoom->academicYear ? ' · ' . $classRoom->academicYear->name : '')
+                    . ($classRoom->year_level_code ? ')' : '')
+                );
+
+                return [(string) $classRoom->id => $label];
+            })
+            ->all();
+
+        $currentYearLevel = YearLevel::storageValue($student->year_level) ?? $student->year_level;
 
         return $this->editRecord('Student', $student, route('admin.students.update', $student), route('admin.students'), [
             $this->field('Student ID', 'student_id', $student->student_id, true),
@@ -46,11 +96,12 @@ class AdminPeopleController extends Controller
             $this->field('Email', 'email', $student->user?->email, true, 'email'),
             $this->field('Date of birth', 'date_of_birth', $student->date_of_birth, true, 'date'),
             $this->field('Gender', 'gender', $student->gender, true, 'select', ['Male', 'Female']),
-            $this->field('Department', 'department', $student->department?->name),
-            $this->field('Major', 'major', $student->major),
-            $this->field('Academic year', 'academic_year', $student->academic_year),
-            $this->field('Year level', 'year_level', $student->year_level),
-            $this->field('Semester', 'semester', $student->semester),
+            $this->field('Faculty', 'department', $student->department?->name),
+            $this->field('Major', 'major', $student->program?->name ?? $student->major),
+            $this->field('Academic year', 'academic_year', $student->resolveAcademicYearName(), false, 'select', $academicYearOptions),
+            $this->field('Year level', 'year_level', $currentYearLevel, false, 'select', YearLevel::selectOptions()),
+            $this->field('Class', 'class_id', $student->class_id !== null ? (string) $student->class_id : '', false, 'select', $classOptions),
+            $this->field('Semester', 'semester', $student->resolveSemesterName()),
             $this->field('Enrollment date', 'enrollment_date', $student->enrollment_date, false, 'date'),
             $this->field('Advisor', 'advisor', $student->advisor),
             $this->field('Phone', 'phone', $student->phone),
@@ -59,8 +110,15 @@ class AdminPeopleController extends Controller
         ]);
     }
 
-    public function updateStudent(Request $request, Student $student): RedirectResponse
+    public function updateStudent(Request $request, Student $student, AcademicProfileResolver $resolver): RedirectResponse
     {
+        if (! $request->filled('department') && $request->filled('faculty')) {
+            $request->merge(['department' => $request->input('faculty')]);
+        }
+        if (! $request->filled('program_id') && $request->filled('major_id')) {
+            $request->merge(['program_id' => $request->input('major_id')]);
+        }
+
         $validated = $request->validate([
             'student_id' => ['required', 'string', 'max:50', Rule::unique('students', 'student_code')->ignore($student->id)],
             'first_name' => 'required|string|max:100',
@@ -73,17 +131,80 @@ class AdminPeopleController extends Controller
             'phone' => 'nullable|string|max:30',
             'address' => 'nullable|string|max:255',
             'department' => 'nullable|string|max:255',
+            'program_id' => 'nullable|integer|exists:programs,id',
             'major' => 'nullable|string|max:255',
             'academic_year' => 'nullable|string|max:20',
-            'year_level' => 'nullable|string|max:255',
+            'year_level' => ['nullable', new ValidYearLevel()],
+            'class_id' => 'nullable|integer|exists:classes,id',
             'semester' => 'nullable|string|max:50',
             'advisor' => 'nullable|string|max:255',
             'enrollment_date' => 'nullable|date',
             'status' => 'required|in:enrolled,graduated,suspended,inactive',
         ]);
 
-        DB::transaction(function () use ($student, $validated) {
-            $student->update(collect($validated)->except(['email', 'password'])->all());
+        $previousYearLevel = $student->year_level;
+        $nextYearLevel = array_key_exists('year_level', $validated)
+            ? ($validated['year_level'] !== null && $validated['year_level'] !== ''
+                ? YearLevel::storageValue($validated['year_level'])
+                : null)
+            : $student->year_level;
+
+        DB::transaction(function () use ($student, $validated, $resolver, $nextYearLevel) {
+            $deptId = array_key_exists('department', $validated) && filled($validated['department'])
+                ? ($resolver->resolveDepartmentId(null, $validated['department']) ?? $student->department_id)
+                : $student->department_id;
+
+            $programId = $validated['program_id'] ?? $student->program_id;
+            $majorName = $validated['major'] ?? $student->major;
+            if (! empty($validated['program_id'])) {
+                $progObj = Program::find($validated['program_id']);
+                if ($progObj && $deptId && $progObj->department_id
+                    && ! StudentImportValidationService::areDepartmentAndProgramCompatible((int) $progObj->department_id, (int) $deptId)) {
+                    throw ValidationException::withMessages([
+                        'program_id' => ['Selected major does not belong to the selected faculty.'],
+                    ]);
+                }
+                if ($progObj) {
+                    $majorName = $progObj->name;
+                }
+            } elseif (array_key_exists('major', $validated) && filled($validated['major'])) {
+                $matchedProg = ($deptId
+                    ? Program::where('department_id', $deptId)
+                        ->where(fn ($q) => $q->where('name', $validated['major'])->orWhere('code', $validated['major']))
+                        ->first()
+                    : null)
+                    ?? Program::where('name', $validated['major'])->orWhere('code', $validated['major'])->first();
+                if ($matchedProg) {
+                    $programId = $matchedProg->id;
+                }
+            }
+
+            $classId = array_key_exists('class_id', $validated)
+                ? ($validated['class_id'] !== null && $validated['class_id'] !== '' ? (int) $validated['class_id'] : null)
+                : ($resolver->findClassId(
+                    $deptId,
+                    $validated['academic_year'] ?? $student->resolveAcademicYearName(),
+                    $nextYearLevel
+                ) ?? $student->class_id);
+
+            $student->update([
+                'student_code' => $validated['student_id'],
+                'first_name' => $validated['first_name'],
+                'last_name' => $validated['last_name'],
+                'date_of_birth' => $validated['date_of_birth'],
+                'gender' => $validated['gender'],
+                'nationality' => $validated['nationality'] ?? $student->nationality,
+                'phone' => $validated['phone'] ?? $student->phone,
+                'address' => $validated['address'] ?? $student->address,
+                'department_id' => $deptId,
+                'program_id' => $programId,
+                'class_id' => $classId,
+                'major' => $majorName,
+                'year_level' => $nextYearLevel,
+                'advisor' => $validated['advisor'] ?? $student->advisor,
+                'enrollment_date' => $validated['enrollment_date'] ?? $student->enrollment_date,
+                'status' => $validated['status'],
+            ]);
 
             if ($student->user) {
                 $student->user->update([
@@ -93,6 +214,15 @@ class AdminPeopleController extends Controller
                 ]);
             }
         });
+
+        if ((string) $previousYearLevel !== (string) $nextYearLevel) {
+            Log::info('Admin updated student year level via web', [
+                'admin_user_id' => $request->user()?->id,
+                'student_id' => $student->id,
+                'from_year_level' => $previousYearLevel,
+                'to_year_level' => $nextYearLevel,
+            ]);
+        }
 
         return redirect()->route('admin.students.show', $student)->with('status', 'Student updated successfully.');
     }
@@ -118,7 +248,7 @@ class AdminPeopleController extends Controller
             'Teacher ID' => $teacher->teacher_id,
             'Name' => $teacher->user?->name ?? trim($teacher->first_name . ' ' . $teacher->last_name),
             'Email' => $teacher->user?->email ?? 'Not set',
-            'Department' => $teacher->department?->name ?? 'Not set',
+            'Faculty' => $teacher->department?->name ?? 'Not set',
             'Position' => $teacher->position,
             'Work Type' => $teacher->work_type ?? 'Full-time',
             'Office Location' => $teacher->office?->display_name ?? 'Not set',
@@ -146,7 +276,7 @@ class AdminPeopleController extends Controller
                 $this->field('First name', 'first_name', $teacher->first_name, true),
                 $this->field('Last name', 'last_name', $teacher->last_name, true),
                 $this->field('Email', 'email', $teacher->user?->email, true, 'email'),
-                $this->field('Department', 'department', $teacher->department?->name),
+                $this->field('Faculty', 'department', $teacher->department?->name),
                 $this->field('Position', 'position', $teacher->position),
                 $this->field('Work type', 'work_type', $teacher->work_type ?? 'Full-time', false, 'select', ['Full-time', 'Part-time']),
                 $this->field('Date of birth', 'date_of_birth', $teacher->date_of_birth?->format('Y-m-d'), false, 'date'),

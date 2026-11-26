@@ -24,19 +24,18 @@ class NotificationController extends Controller
     {
         if ($request->expectsJson() || $request->is('api/*')) {
             $apiUser = auth('sanctum')->user() ?? $request->user();
+            if (! $apiUser) {
+                return response()->json(['message' => 'Unauthenticated.'], 401);
+            }
             $query = Notification::query()->latest();
 
-            if ($apiUser) {
-                if ($apiUser->role === 'admin' && $request->boolean('all', true)) {
-                    // Admin can view system-wide notifications or their own
-                    if ($request->filled('user_id')) {
-                        $query->where('user_id', (int) $request->query('user_id'));
-                    }
-                } else {
-                    $query->where('user_id', $apiUser->id);
+            if ($apiUser->role === 'admin' && $request->boolean('all', true)) {
+                // Admin can view system-wide notifications or their own
+                if ($request->filled('user_id')) {
+                    $query->where('user_id', (int) $request->query('user_id'));
                 }
-            } elseif ($request->filled('user_id')) {
-                $query->where('user_id', (int) $request->query('user_id'));
+            } else {
+                $query->where('user_id', $apiUser->id);
             }
 
             if ($request->filled('type')) {
@@ -87,7 +86,10 @@ class NotificationController extends Controller
     public function show(Request $request, Notification $notification): JsonResponse
     {
         $apiUser = auth('sanctum')->user() ?? $request->user();
-        if ($apiUser && $apiUser->role === 'student' && (int) $notification->user_id !== (int) $apiUser->id) {
+        if (! $apiUser) {
+            return response()->json(['message' => 'Unauthenticated.'], 401);
+        }
+        if ($apiUser->role !== 'admin' && (int) $notification->user_id !== (int) $apiUser->id) {
             return response()->json(['message' => 'Unauthorized access.'], 403);
         }
 
@@ -99,6 +101,14 @@ class NotificationController extends Controller
 
     public function store(Request $request): JsonResponse
     {
+        $apiUser = auth('sanctum')->user() ?? $request->user();
+        if (! $apiUser) {
+            return response()->json(['message' => 'Unauthenticated.'], 401);
+        }
+        if ($apiUser->role === 'student') {
+            return response()->json(['message' => 'Unauthorized action.'], 403);
+        }
+
         $validated = $request->validate([
             'user_id' => 'nullable|integer|exists:users,id',
             'target_role' => 'nullable|string|in:all,student,teacher,admin',
@@ -165,7 +175,10 @@ class NotificationController extends Controller
     public function update(Request $request, Notification $notification): JsonResponse
     {
         $apiUser = auth('sanctum')->user() ?? $request->user();
-        if ($apiUser && $apiUser->role === 'student' && (int) $notification->user_id !== (int) $apiUser->id) {
+        if (! $apiUser) {
+            return response()->json(['message' => 'Unauthenticated.'], 401);
+        }
+        if ($apiUser->role !== 'admin' && (int) $notification->user_id !== (int) $apiUser->id) {
             return response()->json(['message' => 'Unauthorized access.'], 403);
         }
 
@@ -194,8 +207,16 @@ class NotificationController extends Controller
         ], 200);
     }
 
-    public function destroy(Notification $notification): JsonResponse
+    public function destroy(Request $request, Notification $notification): JsonResponse
     {
+        $apiUser = auth('sanctum')->user() ?? $request->user();
+        if (! $apiUser) {
+            return response()->json(['message' => 'Unauthenticated.'], 401);
+        }
+        if ($apiUser->role !== 'admin' && (int) $notification->user_id !== (int) $apiUser->id) {
+            return response()->json(['message' => 'Unauthorized access.'], 403);
+        }
+
         $notification->delete();
 
         return response()->json([
@@ -253,6 +274,10 @@ class NotificationController extends Controller
             'status' => 'success',
             'unread_count' => $count,
             'count' => $count,
+            'data' => [
+                'unread_count' => $count,
+                'count' => $count,
+            ],
         ]);
     }
 

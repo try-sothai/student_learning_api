@@ -47,8 +47,11 @@ class TeacherController extends Controller
             $query->where('status', $status === 'active' ? 'active' : 'inactive');
         }
 
-        $department = trim((string) $request->query('department', $request->query('department_id', '')));
-        if ($department !== '' && strtolower($department) !== 'all' && strtolower($department) !== 'all departments') {
+        $department = trim((string) $request->query(
+            'department',
+            $request->query('department_id', $request->query('faculty', $request->query('faculty_id', '')))
+        ));
+        if (! in_array(strtolower($department), ['', 'all', 'all departments', 'all faculties'], true)) {
             if (ctype_digit($department)) {
                 $query->where('department_id', (int) $department);
             } else {
@@ -100,6 +103,12 @@ class TeacherController extends Controller
     {
         if ($request->exists('email') && trim((string) $request->input('email')) === '') {
             $request->merge(['email' => null]);
+        }
+        if (! $request->filled('department_id') && $request->filled('faculty_id')) {
+            $request->merge(['department_id' => $request->input('faculty_id')]);
+        }
+        if (! $request->filled('department') && $request->filled('faculty')) {
+            $request->merge(['department' => $request->input('faculty')]);
         }
 
         $validated = $request->validate([
@@ -162,11 +171,23 @@ class TeacherController extends Controller
         if ($request->exists('email') && trim((string) $request->input('email')) === '') {
             $request->merge(['email' => null]);
         }
+        if (! $request->filled('department_id') && $request->filled('faculty_id')) {
+            $request->merge(['department_id' => $request->input('faculty_id')]);
+        }
+        if (! $request->filled('department') && $request->filled('faculty')) {
+            $request->merge(['department' => $request->input('faculty')]);
+        }
         if ($request->exists('date_of_birth') && trim((string) $request->input('date_of_birth')) === '') {
             $request->merge(['date_of_birth' => null]);
         }
         if ($request->exists('hire_date') && trim((string) $request->input('hire_date')) === '') {
             $request->merge(['hire_date' => null]);
+        }
+        if (! $request->filled('department_id') && $request->filled('faculty_id')) {
+            $request->merge(['department_id' => $request->input('faculty_id')]);
+        }
+        if (! $request->filled('department') && $request->filled('faculty')) {
+            $request->merge(['department' => $request->input('faculty')]);
         }
 
         $validated = $request->validate([

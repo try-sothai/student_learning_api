@@ -15,14 +15,18 @@ use App\Models\StudentFamilyInformation;
 use App\Models\StudentNote;
 use App\Models\Teacher;
 use App\Models\User;
+use App\Rules\ValidYearLevel;
 use App\Services\AcademicProfileResolver;
+use App\Services\StudentImportValidationService;
 use App\Services\TeacherAccountService;
 use App\Services\TeacherProfileService;
 use App\Support\PersonNameHelper;
+use App\Support\YearLevel;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -34,6 +38,13 @@ class AdminUserController extends Controller
         $totalStudents = Student::count();
         $activeStudents = Student::whereIn('status', ['enrolled', 'active'])->count();
         $inactiveStudents = Student::whereIn('status', ['inactive', 'suspended', 'graduated'])->count();
+        $studentsByYearLevel = [
+            'Y1' => Student::forYearLevel(1)->count(),
+            'Y2' => Student::forYearLevel(2)->count(),
+            'Y3' => Student::forYearLevel(3)->count(),
+            'Y4' => Student::forYearLevel(4)->count(),
+            'unassigned' => Student::missingYearLevel()->count(),
+        ];
 
         $totalTeachers = Teacher::count();
         $activeTeachers = Teacher::where('status', 'active')->count();
@@ -51,6 +62,7 @@ class AdminUserController extends Controller
                 'total_students' => $totalStudents,
                 'active_students' => $activeStudents,
                 'inactive_students' => $inactiveStudents,
+                'students_by_year_level' => $studentsByYearLevel,
                 'total_teachers' => $totalTeachers,
                 'active_teachers' => $activeTeachers,
                 'inactive_teachers' => $inactiveTeachers,
@@ -68,13 +80,19 @@ class AdminUserController extends Controller
         $role = strtolower($request->query('role', 'all'));
         $status = strtolower($request->query('status', 'all'));
         $search = trim($request->query('search', ''));
-        $departmentFilter = trim((string) $request->query('department', $request->query('department_id', '')));
+        $departmentFilter = trim((string) $request->query('department', $request->query('department_id', $request->query('faculty', $request->query('faculty_id', '')))));
+        $yearLevelFilter = trim((string) $request->query('year_level', ''));
+        $academicYearIdFilter = $request->filled('academic_year_id') ? (int) $request->query('academic_year_id') : null;
+        $classIdFilter = $request->filled('class_id') ? (int) $request->query('class_id') : null;
+        $semesterIdFilter = $request->filled('semester_id') ? (int) $request->query('semester_id') : null;
+        $missingYearLevel = $request->boolean('missing_year_level') || strtolower($yearLevelFilter) === 'missing';
         $perPage = min(max((int) $request->query('per_page', 15), 1), 100);
 
         $query = User::with([
             'student.department',
             'student.program',
             'student.classRoom.academicYear',
+            'student.courseEnrollments.semester.academicYear',
             'student.familyInformation',
             'student.emergencyContacts',
             'teacher.department',
@@ -98,8 +116,8 @@ class AdminUserController extends Controller
             }
         }
 
-        // Filter by department
-        if ($departmentFilter !== '' && strtolower($departmentFilter) !== 'all' && strtolower($departmentFilter) !== 'all departments') {
+        // Filter by department / faculty
+        if (! in_array(strtolower($departmentFilter), ['', 'all', 'all departments', 'all faculties'], true)) {
             $query->where(function ($q) use ($departmentFilter) {
                 if (ctype_digit($departmentFilter)) {
                     $deptId = (int) $departmentFilter;
@@ -124,6 +142,29 @@ class AdminUserController extends Controller
             } elseif ($status === 'inactive') {
                 $query->whereIn('status', ['inactive', 'suspended', 'graduated']);
             }
+        }
+
+        if ($missingYearLevel) {
+            $query->whereHas('student', fn ($sq) => $sq->missingYearLevel());
+        } elseif ($yearLevelFilter !== '' && strtolower($yearLevelFilter) !== 'all') {
+            $variants = YearLevel::dbVariants($yearLevelFilter);
+            if ($variants === []) {
+                $query->whereRaw('1 = 0');
+            } else {
+                $query->whereHas('student', fn ($sq) => $sq->whereIn('year_level', $variants));
+            }
+        }
+
+        if ($academicYearIdFilter) {
+            $query->whereHas('student.classRoom', fn ($cq) => $cq->where('academic_year_id', $academicYearIdFilter));
+        }
+
+        if ($classIdFilter) {
+            $query->whereHas('student', fn ($sq) => $sq->where('class_id', $classIdFilter));
+        }
+
+        if ($semesterIdFilter) {
+            $query->whereHas('student.courseEnrollments', fn ($eq) => $eq->where('semester_id', $semesterIdFilter));
         }
 
         // Search
@@ -204,6 +245,7 @@ class AdminUserController extends Controller
             'student.department',
             'student.program',
             'student.classRoom.academicYear',
+            'student.courseEnrollments.semester.academicYear',
             'student.familyInformation',
             'student.emergencyContacts',
             'student.courses.teacher.user',
@@ -233,7 +275,15 @@ class AdminUserController extends Controller
         $programCode = '';
         $academicYearId = null;
         $academicYearName = '';
+        $classId = null;
+        $classCode = '';
+        $semesterId = null;
+        $semesterName = '';
         $yearLevel = '';
+        $yearLevelCode = '';
+        $yearLevelName = '';
+        $yearLevelKhmer = '';
+        $yearLevelLabel = '';
         $gender = '';
         $phone = '';
         $dob = '';
@@ -266,8 +316,20 @@ class AdminUserController extends Controller
             $programName = $s->program?->name ?? $s->major ?? '';
             $programCode = $s->program?->code ?? '';
             $academicYearId = $s->classRoom?->academic_year_id;
-            $academicYearName = $s->classRoom?->academicYear?->name ?? '';
-            $yearLevel = (string) ($s->year_level ?? '');
+            $academicYearName = $s->classRoom?->academicYear?->name ?? ($s->resolveAcademicYearName() ?? '');
+            $classId = $s->class_id;
+            $classCode = $s->classRoom?->code ?? '';
+            $latestEnrollment = $s->relationLoaded('courseEnrollments')
+                ? $s->courseEnrollments->sortByDesc('semester_id')->first()
+                : null;
+            $semesterId = $latestEnrollment?->semester_id;
+            $semesterName = $latestEnrollment?->semester?->name ?? '';
+            $parsedYl = YearLevel::parse($s->year_level);
+            $yearLevel = $parsedYl !== null ? (string) $parsedYl : (string) ($s->year_level ?? '');
+            $yearLevelCode = YearLevel::code($s->year_level) ?? '';
+            $yearLevelName = YearLevel::name($s->year_level) ?? '';
+            $yearLevelKhmer = YearLevel::khmer($s->year_level) ?? '';
+            $yearLevelLabel = YearLevel::label($s->year_level) ?? '';
             $gender = $s->gender ?? '';
             $phone = $s->phone ?? '';
             $dob = $s->date_of_birth?->format('Y-m-d') ?? '';
@@ -421,13 +483,27 @@ class AdminUserController extends Controller
             'department_id' => $deptId,
             'department_name' => $deptName,
             'department_code' => $deptCode,
+            'faculty_id' => $deptId,
+            'faculty_name' => $deptName,
+            'faculty_code' => $deptCode,
             'program_id' => $programId,
             'program_name' => $programName,
             'program_code' => $programCode,
+            'major_id' => $programId,
+            'major_name' => $programName,
+            'major_code' => $programCode,
             'year_level' => $yearLevel,
+            'year_level_code' => $yearLevelCode,
+            'year_level_name' => $yearLevelName,
+            'year_level_khmer' => $yearLevelKhmer,
+            'year_level_label' => $yearLevelLabel,
             'academic_year_id' => $academicYearId,
             'academic_year_name' => $academicYearName,
+            'class_id' => $classId,
+            'class_code' => $classCode,
             'class_name' => $user->student?->classRoom?->name ?? $user->student?->classRoom?->code ?? '',
+            'semester_id' => $semesterId,
+            'semester_name' => $semesterName,
             'position' => $position,
             'work_type' => $workType,
             'office_location_id' => $officeLocationId,
@@ -477,6 +553,7 @@ class AdminUserController extends Controller
         if ($request->exists('hire_date') && trim((string) $request->input('hire_date')) === '') {
             $request->merge(['hire_date' => null]);
         }
+        $this->normalizeAcademicAliases($request);
 
         $role = strtolower($request->input('role', 'student'));
 
@@ -503,6 +580,14 @@ class AdminUserController extends Controller
             'department_id' => 'nullable|integer|exists:departments,id',
             'department' => 'nullable|string|max:255',
             'department_name' => 'nullable|string|max:255',
+            'program_id' => 'nullable|integer|exists:programs,id',
+            'program' => 'nullable|string|max:255',
+            'major' => 'nullable|string|max:255',
+            'year_level' => ['nullable', new ValidYearLevel()],
+            'academic_year_id' => 'nullable|integer|exists:academic_years,id',
+            'academic_year' => 'nullable|string|max:50',
+            'class_id' => 'nullable|integer|exists:classes,id',
+            'semester_id' => 'nullable|integer|exists:semesters,id',
             'position' => 'nullable|string|max:255',
             'work_type' => 'nullable|string|max:50',
             'office_location_id' => 'nullable|integer|exists:office_locations,id',
@@ -512,6 +597,9 @@ class AdminUserController extends Controller
             'specializations.*' => 'nullable|string|max:120',
             'biography' => 'nullable|string|max:2000',
             'bio' => 'nullable|string|max:2000',
+        ], [], [
+            'department_id' => 'faculty',
+            'program_id' => 'major',
         ]);
 
         $khmerName = PersonNameHelper::clean($validated['khmer_name'] ?? null);
@@ -568,12 +656,64 @@ class AdminUserController extends Controller
 
             if ($role === 'student') {
                 $studentCode = $validated['student_code'] ?? $validated['student_id'] ?? $validated['code'] ?? $validated['user_code'] ?? ('STU' . str_pad((string) $user->id, 4, '0', STR_PAD_LEFT));
+                $yearLevelStorage = array_key_exists('year_level', $validated) && $validated['year_level'] !== null && $validated['year_level'] !== ''
+                    ? YearLevel::storageValue($validated['year_level'])
+                    : null;
+
+                $programId = $validated['program_id'] ?? null;
+                $majorName = $validated['major'] ?? $validated['program'] ?? null;
+                if (! $programId && ! empty($majorName)) {
+                    $prog = Program::where('department_id', $departmentId)
+                        ->where(fn ($q) => $q->where('name', $majorName)->orWhere('code', $majorName))
+                        ->first()
+                        ?? Program::where('name', $majorName)->orWhere('code', $majorName)->first();
+                    $programId = $prog?->id;
+                } elseif ($programId && ! $majorName) {
+                    $majorName = Program::where('id', $programId)->value('name');
+                }
+
+                if ($departmentId && $programId) {
+                    $progObj = Program::find($programId);
+                    if ($progObj && $progObj->department_id
+                        && ! StudentImportValidationService::areDepartmentAndProgramCompatible((int) $progObj->department_id, (int) $departmentId)) {
+                        throw ValidationException::withMessages([
+                            'program_id' => ['Selected major does not belong to the selected faculty.'],
+                        ]);
+                    }
+                }
+
+                $classId = $validated['class_id'] ?? null;
+                $ayId = $validated['academic_year_id'] ?? null;
+                if (! $ayId && ! empty($validated['academic_year'])) {
+                    $ayId = AcademicYear::where('name', str_replace('–', '-', trim($validated['academic_year'])))->value('id');
+                }
+                if (! $classId && $departmentId && $ayId && $yearLevelStorage !== null) {
+                    $dept = Department::find($departmentId);
+                    $ay = AcademicYear::find($ayId);
+                    if ($dept && $ay) {
+                        $lvlInt = (int) $yearLevelStorage;
+                        $code = substr("{$dept->code}-Y{$lvlInt}-{$ay->name}", 0, 40);
+                        $classRoom = ClassRoom::firstOrCreate(['code' => $code], [
+                            'department_id' => $dept->id,
+                            'academic_year_id' => $ay->id,
+                            'name' => substr("{$dept->name} Year {$lvlInt} ({$ay->name})", 0, 100),
+                            'year_level' => $lvlInt,
+                            'status' => 'active',
+                        ]);
+                        $classId = $classRoom->id;
+                    }
+                }
+
                 Student::create([
                     'user_id' => $user->id,
                     'student_code' => $studentCode,
                     'khmer_name' => $khmerName,
                     'english_name' => $englishName,
                     'department_id' => $departmentId,
+                    'program_id' => $programId,
+                    'class_id' => $classId,
+                    'major' => $majorName,
+                    'year_level' => $yearLevelStorage,
                     'first_name' => $firstName,
                     'last_name' => $lastName,
                     'date_of_birth' => $validated['date_of_birth'] ?? null,
@@ -651,6 +791,7 @@ class AdminUserController extends Controller
         if ($request->exists('hire_date') && trim((string) $request->input('hire_date')) === '') {
             $request->merge(['hire_date' => null]);
         }
+        $this->normalizeAcademicAliases($request);
 
         $validated = $request->validate([
             'name' => 'nullable|string|max:255',
@@ -679,9 +820,10 @@ class AdminUserController extends Controller
             'program_id' => 'nullable|integer|exists:programs,id',
             'program' => 'nullable|string|max:255',
             'major' => 'nullable|string|max:255',
-            'year_level' => 'nullable|string|max:50',
+            'year_level' => ['nullable', new ValidYearLevel()],
             'academic_year_id' => 'nullable|integer|exists:academic_years,id',
             'academic_year' => 'nullable|string|max:50',
+            'class_id' => 'nullable|integer|exists:classes,id',
             'semester_id' => 'nullable|integer|exists:semesters,id',
             'position' => 'nullable|string|max:255',
             'work_type' => 'nullable|string|max:50',
@@ -702,6 +844,9 @@ class AdminUserController extends Controller
             'emergency_relationship' => 'nullable|string|max:80',
             'emergency_contact_phone' => 'nullable|string|max:30',
             'emergency_contact_address' => 'nullable|string|max:255',
+        ], [], [
+            'department_id' => 'faculty',
+            'program_id' => 'major',
         ]);
 
         if ($user->teacher && $request->filled('teacher_code')) {
@@ -783,13 +928,16 @@ class AdminUserController extends Controller
                 $s = $user->student;
                 $deptId = $resolver->resolveDepartmentId(
                     $validated['department_id'] ?? null,
-                    $validated['department'] ?? null
+                    $validated['department_name'] ?? $validated['department'] ?? null
                 ) ?? $s->department_id;
 
                 $programId = $validated['program_id'] ?? $s->program_id;
                 $programName = $validated['program'] ?? $validated['major'] ?? null;
                 if (empty($validated['program_id']) && $programName) {
-                    $prog = Program::where('name', $programName)->orWhere('code', $programName)->first();
+                    $prog = Program::where('department_id', $deptId)
+                        ->where(fn ($q) => $q->where('name', $programName)->orWhere('code', $programName))
+                        ->first()
+                        ?? Program::where('name', $programName)->orWhere('code', $programName)->first();
                     if ($prog) {
                         $programId = $prog->id;
                         $programName = $prog->name;
@@ -798,31 +946,47 @@ class AdminUserController extends Controller
                     $programName = Program::where('id', $programId)->value('name') ?? $s->major;
                 }
 
-                $yearLevel = $validated['year_level'] ?? $s->year_level;
-                if (is_string($yearLevel) && preg_match('/^year\s*(\d+)$/i', $yearLevel, $m)) {
-                    $yearLevel = $m[1];
+                if ($request->hasAny(['department_id', 'department', 'department_name', 'program_id', 'program', 'major'])
+                    && $deptId && $programId) {
+                    $progObj = Program::find($programId);
+                    if ($progObj && $progObj->department_id
+                        && ! StudentImportValidationService::areDepartmentAndProgramCompatible((int) $progObj->department_id, (int) $deptId)) {
+                        throw ValidationException::withMessages([
+                            'program_id' => ['Selected major does not belong to the selected faculty.'],
+                        ]);
+                    }
                 }
 
-                $classId = $s->class_id;
+                $previousYearLevel = $s->year_level;
+                $yearLevel = $s->year_level;
+                if (array_key_exists('year_level', $validated)) {
+                    $yearLevel = ($validated['year_level'] !== null && $validated['year_level'] !== '')
+                        ? YearLevel::storageValue($validated['year_level'])
+                        : null;
+                }
+
+                $classId = $validated['class_id'] ?? $s->class_id;
                 $ayId = $validated['academic_year_id'] ?? null;
                 if (!$ayId && !empty($validated['academic_year'])) {
                     $ayName = str_replace('–', '-', $validated['academic_year']);
                     $ayId = AcademicYear::where('name', $ayName)->value('id');
                 }
-                if ($deptId && $ayId && $yearLevel) {
+                if (empty($validated['class_id']) && $deptId && $ayId && $yearLevel) {
                     $dept = Department::find($deptId);
                     $ay = AcademicYear::find($ayId);
                     if ($dept && $ay) {
-                        $lvlInt = (int) preg_replace('/\D/', '', (string) $yearLevel) ?: 1;
-                        $code = substr("{$dept->code}-Y{$lvlInt}-{$ay->name}", 0, 40);
-                        $classRoom = ClassRoom::firstOrCreate(['code' => $code], [
-                            'department_id' => $dept->id,
-                            'academic_year_id' => $ay->id,
-                            'name' => substr("{$dept->name} Year {$lvlInt} ({$ay->name})", 0, 100),
-                            'year_level' => $lvlInt,
-                            'status' => 'active',
-                        ]);
-                        $classId = $classRoom->id;
+                        $lvlInt = (int) YearLevel::parse($yearLevel);
+                        if ($lvlInt >= 1) {
+                            $code = substr("{$dept->code}-Y{$lvlInt}-{$ay->name}", 0, 40);
+                            $classRoom = ClassRoom::firstOrCreate(['code' => $code], [
+                                'department_id' => $dept->id,
+                                'academic_year_id' => $ay->id,
+                                'name' => substr("{$dept->name} Year {$lvlInt} ({$ay->name})", 0, 100),
+                                'year_level' => $lvlInt,
+                                'status' => 'active',
+                            ]);
+                            $classId = $classRoom->id;
+                        }
                     }
                 }
 
@@ -853,9 +1017,19 @@ class AdminUserController extends Controller
                     'program_id' => $programId,
                     'class_id' => $classId,
                     'major' => $programName ?? $s->major,
-                    'year_level' => (string) $yearLevel,
+                    'year_level' => $yearLevel,
                     'status' => $studentStatus,
                 ]);
+
+                if ((string) $previousYearLevel !== (string) $yearLevel) {
+                    Log::info('Admin updated student year level via admin/users', [
+                        'admin_id' => $request->user()?->id,
+                        'student_id' => $s->id,
+                        'student_code' => $s->student_code,
+                        'from_year_level' => $previousYearLevel,
+                        'to_year_level' => $yearLevel,
+                    ]);
+                }
 
                 $hasFamilyFields = collect([
                     'father_khmer_name', 'father_english_name', 'father_phone',
@@ -983,6 +1157,7 @@ class AdminUserController extends Controller
             'student.department',
             'student.program',
             'student.classRoom.academicYear',
+            'student.courseEnrollments.semester.academicYear',
             'student.familyInformation',
             'student.emergencyContacts',
             'student.courses.teacher.user',
@@ -1054,5 +1229,28 @@ class AdminUserController extends Controller
         return response()->json([
             'message' => 'User deleted successfully.',
         ], 200);
+    }
+
+    private function normalizeAcademicAliases(Request $request): void
+    {
+        $merge = [];
+        if (! $request->filled('department_id') && $request->filled('faculty_id')) {
+            $merge['department_id'] = $request->input('faculty_id');
+        }
+        if (! $request->filled('department') && $request->filled('faculty')) {
+            $merge['department'] = $request->input('faculty');
+        }
+        if (! $request->filled('department_name') && $request->filled('faculty_name')) {
+            $merge['department_name'] = $request->input('faculty_name');
+        }
+        if (! $request->filled('program_id') && $request->filled('major_id')) {
+            $merge['program_id'] = $request->input('major_id');
+        }
+        if (! $request->filled('major') && $request->filled('major_name')) {
+            $merge['major'] = $request->input('major_name');
+        }
+        if ($merge !== []) {
+            $request->merge($merge);
+        }
     }
 }

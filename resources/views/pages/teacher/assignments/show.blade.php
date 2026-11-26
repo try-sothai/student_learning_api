@@ -40,7 +40,7 @@
                 @foreach($assignment->attempts as $attempt)
                     <tr>
                         <td class="ps-4 fw-semibold">{{ $attempt->student?->user?->name ?? trim(($attempt->student?->first_name ?? '') . ' ' . ($attempt->student?->last_name ?? '')) }}</td>
-                        <td>{{ $attempt->student?->student_id }}</td>
+                        <td>{{ $attempt->student?->student_id }} @if($attempt->student?->year_level_code)<span class="badge bg-primary-subtle text-primary ms-1">{{ $attempt->student->year_level_code }}</span>@endif</td>
                         <td>{{ $attempt->attempt_number }}</td>
                         <td>{{ $attempt->submitted_at?->format('M d, Y H:i') }}</td>
                         <td>{{ $attempt->score !== null ? number_format((float) $attempt->score, 0) . '%' : 'Not graded' }}</td>

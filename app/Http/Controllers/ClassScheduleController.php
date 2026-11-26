@@ -10,6 +10,7 @@ use App\Models\CourseOffering;
 use App\Models\Semester;
 use App\Models\Student;
 use App\Services\TeacherAuthorizationService;
+use App\Support\YearLevel;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -61,6 +62,13 @@ class ClassScheduleController extends Controller
         if ($request->filled('class_id')) {
             $query->where('class_id', (int) $request->class_id);
         }
+        if ($request->filled('year_level') && strtolower((string) $request->year_level) !== 'all') {
+            $yearLevelInput = $request->year_level;
+            $query->where(function ($sub) use ($yearLevelInput) {
+                $sub->whereHas('classRoom', fn ($c) => $c->forYearLevel($yearLevelInput))
+                    ->orWhereHas('course', fn ($c) => $c->forYearLevel($yearLevelInput));
+            });
+        }
         if ($request->filled('course_id')) {
             $query->where('course_id', (int) $request->course_id);
         }
@@ -90,7 +98,15 @@ class ClassScheduleController extends Controller
             });
         }
 
-        $schedules = $this->sortSchedulesChronologically($query->get());
+        $schedules = $this->sortSchedulesChronologically($query->get())->map(function (ClassSchedule $s) {
+            $lvl = YearLevel::parse($s->classRoom?->year_level ?? $s->courseOffering?->study_year ?? $s->course?->year_level);
+            $s->setAttribute('year_level', $lvl);
+            $s->setAttribute('year_level_code', YearLevel::code($lvl));
+            $s->setAttribute('year_level_name', YearLevel::name($lvl));
+            $s->setAttribute('year_level_label', YearLevel::label($lvl));
+
+            return $s;
+        });
 
         return response()->json([
             'message' => 'Class schedules retrieved successfully.',
@@ -157,8 +173,23 @@ class ClassScheduleController extends Controller
         if ($request->filled('semester_id')) {
             $query->where('semester_id', (int) $request->semester_id);
         }
+        if ($request->filled('year_level') && strtolower((string) $request->year_level) !== 'all') {
+            $yearLevelInput = $request->year_level;
+            $query->where(function ($sub) use ($yearLevelInput) {
+                $sub->whereHas('classRoom', fn ($c) => $c->forYearLevel($yearLevelInput))
+                    ->orWhereHas('course', fn ($c) => $c->forYearLevel($yearLevelInput));
+            });
+        }
 
-        $schedules = $this->sortSchedulesChronologically($query->get());
+        $schedules = $this->sortSchedulesChronologically($query->get())->map(function (ClassSchedule $s) {
+            $lvl = YearLevel::parse($s->classRoom?->year_level ?? $s->courseOffering?->study_year ?? $s->course?->year_level);
+            $s->setAttribute('year_level', $lvl);
+            $s->setAttribute('year_level_code', YearLevel::code($lvl));
+            $s->setAttribute('year_level_name', YearLevel::name($lvl));
+            $s->setAttribute('year_level_label', YearLevel::label($lvl));
+
+            return $s;
+        });
 
         return response()->json([
             'message' => 'My schedules retrieved successfully.',

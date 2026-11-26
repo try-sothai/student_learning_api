@@ -55,7 +55,7 @@
                                 <input id="newClassCode" name="code" class="form-control" required maxlength="50" value="{{ old('code') }}">
                             </div>
                             <div class="col-md-6">
-                                <label class="form-label" for="newClassDepartment">Department</label>
+                                <label class="form-label" for="newClassDepartment">Faculty</label>
                                 <input id="newClassDepartment" name="department" class="form-control" maxlength="255" value="{{ old('department') }}">
                             </div>
                             <div class="col-md-6">
@@ -65,6 +65,15 @@
                             <div class="col-md-6">
                                 <label class="form-label" for="newClassAcademicYear">Academic year</label>
                                 <input id="newClassAcademicYear" name="academic_year" class="form-control" maxlength="20" value="{{ old('academic_year') }}">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label" for="newClassYearLevel">Student year level</label>
+                                <select id="newClassYearLevel" name="year_level" class="form-select">
+                                    <option value="">{{ __('Cross-year / All levels') }}</option>
+                                    @foreach(\App\Support\YearLevel::options() as $yl)
+                                        <option value="{{ $yl['number'] }}" @selected((string) old('year_level') === (string) $yl['number'])>{{ $yl['bilingual_label'] }}</option>
+                                    @endforeach
+                                </select>
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label" for="newClassSemester">Semester</label>
@@ -117,6 +126,7 @@
                                             <label class="form-check-label" for="modal_student_{{ $student->id }}">
                                                 {{ $student->user?->name ?? trim($student->first_name . ' ' . $student->last_name) }}
                                                 <span class="text-muted">({{ $student->student_id }})</span>
+                                                <span class="badge {{ $student->year_level_code ? 'bg-primary-subtle text-primary' : 'bg-warning-subtle text-warning-emphasis' }} ms-1">{{ $student->year_level_code ?? __('Unassigned') }}</span>
                                             </label>
                                         </div>
                                     @endforeach

@@ -3,19 +3,21 @@
 namespace App\Http\Controllers;
 
 use App\Models\Course;
+use App\Models\Student;
 use App\Models\Teacher;
+use App\Rules\ValidYearLevel;
+use App\Support\YearLevel;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
-use App\Models\Student;
 
 class AdminCourseController extends Controller
 {
     public function show(Course $course): View
     {
-        $course->load('teacher.user', 'students.user', 'assignments');
+        $course->load('teacher.user', 'students.user', 'students.classRoom', 'assignments');
         $availableStudents = Student::query()
             ->whereDoesntHave('courses', fn ($query) => $query->where('courses.id', $course->id))
             ->with('user')
@@ -46,10 +48,17 @@ class AdminCourseController extends Controller
             'student_ids.*' => 'required|integer|distinct|exists:students,id',
         ]);
 
+        $studentLevels = Student::query()
+            ->whereIn('id', $validated['student_ids'])
+            ->pluck('year_level', 'id');
+
+        $courseYearLevel = YearLevel::parse($course->year_level);
+
         foreach ($validated['student_ids'] as $studentId) {
             $course->students()->syncWithoutDetaching([
                 $studentId => [
                     'status' => 'enrolled',
+                    'year_level' => $courseYearLevel ?? YearLevel::parse($studentLevels->get($studentId)),
                 ],
             ]);
         }
@@ -82,6 +91,7 @@ class AdminCourseController extends Controller
             'credits' => 'nullable|integer|min:1|max:30',
             'teacher_id' => 'nullable|exists:teachers,id',
             'academic_year' => 'nullable|string|max:20',
+            'year_level' => ['nullable', new ValidYearLevel()],
             'semester' => 'nullable|string|max:50',
             'day_of_week' => 'nullable|string|max:20',
             'start_time' => 'nullable|date_format:H:i',
@@ -89,6 +99,12 @@ class AdminCourseController extends Controller
             'room' => 'nullable|string|max:100',
             'status' => 'required|in:active,inactive',
         ]);
+
+        if (array_key_exists('year_level', $validated)) {
+            $validated['year_level'] = filled($validated['year_level'])
+                ? YearLevel::parse($validated['year_level'])
+                : null;
+        }
 
         $course->update($validated);
 

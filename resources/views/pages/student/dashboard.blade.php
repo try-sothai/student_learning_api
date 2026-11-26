@@ -5,11 +5,13 @@
 @section('content')
 
 @php
+    $academicYearLabel = $studentProfile?->resolveAcademicYearName() ?? 'Not set';
+    $yearLevelLabel = $studentProfile?->year_level_label ?? ($studentProfile?->year_level ?: 'Not set');
     $profileFacts = [
         ['Student ID', $studentProfile?->student_id ?? 'Not set', 'person-vcard'],
         ['Enrollment status', ucfirst($studentProfile?->status ?? 'not set'), 'check2-circle'],
-        ['Academic year', $studentProfile?->academic_year ?? 'Not set', 'calendar3'],
-        ['Year level', $studentProfile?->year_level ?? 'Not set', 'mortarboard'],
+        ['Academic year', $academicYearLabel, 'calendar3'],
+        ['Year level', $yearLevelLabel, 'mortarboard'],
     ];
 @endphp
 

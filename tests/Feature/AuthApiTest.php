@@ -162,7 +162,7 @@ class AuthApiTest extends TestCase
         $this->get(route('student.settings'))
             ->assertOk()
             ->assertSee('Student information')
-            ->assertSee('Department')
+            ->assertSee('Faculty')
             ->assertSee('Computer Science')
             ->assertSee('Academic year')
             ->assertSee('name="profile_picture"', false)

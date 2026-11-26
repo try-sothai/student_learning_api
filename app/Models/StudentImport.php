@@ -69,7 +69,10 @@ class StudentImport extends Model
                             || str_contains($msg, 'At least one of khmer_name or english_name')) {
                             $hasMissing = true;
                         }
-                        if (str_contains($msg, 'department_code') || str_contains($msg, 'program_code')) {
+                        if (str_contains($msg, 'department_code')
+                            || str_contains($msg, 'program_code')
+                            || str_contains(mb_strtolower($msg), 'faculty')
+                            || str_contains(mb_strtolower($msg), 'major')) {
                             $hasDeptProg = true;
                         }
                     }

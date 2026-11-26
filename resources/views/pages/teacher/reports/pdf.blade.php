@@ -35,12 +35,13 @@
         <div class="empty">No classes have been assigned to you yet.</div>
     @else
         <table class="report">
-            <thead><tr><th>Class</th><th>Code</th><th>Enrolled students</th><th>Attendance rate</th><th>Present or late</th><th>Absent</th><th>Assignments</th></tr></thead>
+            <thead><tr><th>Class</th><th>Code</th><th>Year level</th><th>Enrolled students</th><th>Attendance rate</th><th>Present or late</th><th>Absent</th><th>Assignments</th></tr></thead>
             <tbody>
                 @foreach($reportRows as $row)
                     <tr>
                         <td>{{ $row['name'] }}</td>
                         <td>{{ $row['code'] }}</td>
+                        <td>{{ $row['year_level_code'] ?? 'Cross-year' }}</td>
                         <td>{{ $row['enrolled'] }}</td>
                         <td>{{ $row['attendance_rate'] }}</td>
                         <td>{{ $row['attended'] }}</td>

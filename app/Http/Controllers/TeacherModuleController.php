@@ -14,6 +14,7 @@ use App\Models\GpaRecord;
 use App\Models\Grade;
 use App\Models\Prediction;
 use App\Models\Quiz;
+use App\Models\QuizAnswer;
 use App\Models\QuizAttempt;
 use App\Models\QuizQuestion;
 use App\Models\Recommendation;
@@ -21,11 +22,13 @@ use App\Models\RiskAssessment;
 use App\Models\Student;
 use App\Models\Teacher;
 use App\Services\AssessmentAccessService;
+use App\Services\QuizGradingService;
 use App\Services\SubmissionFileService;
 use App\Services\TeacherAnalyticsService;
 use App\Services\TeacherAuthorizationService;
 use App\Services\TeacherDashboardService;
 use App\Support\PersonNameHelper;
+use App\Support\YearLevel;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -39,7 +42,8 @@ class TeacherModuleController extends Controller
         protected TeacherDashboardService $dashboardService,
         protected TeacherAnalyticsService $analyticsService,
         protected AssessmentAccessService $accessService,
-        protected SubmissionFileService $submissionFiles
+        protected SubmissionFileService $submissionFiles,
+        protected QuizGradingService $quizGrading
     ) {}
 
     /**
@@ -80,6 +84,7 @@ class TeacherModuleController extends Controller
             'class_id',
             'program_id',
             'study_year',
+            'year_level',
         ]);
 
         $summary = $this->dashboardService->getSummaryMetrics($teacher, $filters);
@@ -129,6 +134,7 @@ class TeacherModuleController extends Controller
             'class_id',
             'program_id',
             'study_year',
+            'year_level',
         ]);
 
         if (! empty($filters['course_id']) && ! $this->authService->isCourseAuthorized($teacher, (int) $filters['course_id'])) {
@@ -262,7 +268,7 @@ class TeacherModuleController extends Controller
                          ->where('semester_id', $offering->semester_id);
                   });
             })
-            ->with(['student.user', 'student.classRoom', 'student.department', 'student.program'])
+            ->with(['student.user', 'student.classRoom.academicYear', 'student.department', 'student.program'])
             ->get()
             ->map(fn ($e) => [
                 'enrollment_id' => $e->id,
@@ -272,6 +278,10 @@ class TeacherModuleController extends Controller
                 'name' => trim(($e->student?->first_name ?? '') . ' ' . ($e->student?->last_name ?? '')),
                 'email' => $e->student?->user?->email,
                 'class' => $e->student?->classRoom?->name,
+                'year_level' => YearLevel::storageValue($e->student?->year_level),
+                'year_level_code' => YearLevel::code($e->student?->year_level),
+                'year_level_label' => YearLevel::label($e->student?->year_level),
+                'academic_year' => $e->student?->resolveAcademicYearName(),
                 'status' => $e->status,
                 'final_score' => $e->final_score,
                 'grade' => $e->grade,
@@ -326,7 +336,7 @@ class TeacherModuleController extends Controller
                     $q->orWhereIn('course_id', $courseIds);
                 }
             })
-            ->with(['student.user', 'student.department', 'student.program', 'student.classRoom', 'course', 'semester'])
+            ->with(['student.user', 'student.department', 'student.program', 'student.classRoom.academicYear', 'course', 'semester.academicYear'])
             ->get();
 
         $studentIds = $enrollments->pluck('student_id')->filter()->unique()->all();
@@ -357,6 +367,11 @@ class TeacherModuleController extends Controller
 
         $search = strtolower(trim((string) $request->query('search', '')));
         $riskFilter = strtolower(trim((string) $request->query('risk_level', '')));
+        $rawYearLevelFilter = trim((string) $request->query('year_level', $request->query('study_year', '')));
+        $missingYearLevel = $request->boolean('missing_year_level') || strtolower($rawYearLevelFilter) === 'missing';
+        $targetYearLevel = (! $missingYearLevel && $rawYearLevelFilter !== '' && strtolower($rawYearLevelFilter) !== 'all')
+            ? YearLevel::parse($rawYearLevelFilter)
+            : null;
 
         $studentsList = $enrollments
             ->groupBy('student_id')
@@ -380,6 +395,7 @@ class TeacherModuleController extends Controller
                 $attRate = ($att && $att->total > 0) ? (int) round(($att->attended / $att->total) * 100) : 0;
                 $courseCode = $first->course?->code ?? $first->course?->course_code ?? 'N/A';
                 $courseName = $first->course?->name ?? $first->course?->course_name ?? 'Course';
+                $ylInt = YearLevel::parse($s->year_level);
 
                 return [
                     'id' => $sid,
@@ -387,10 +403,16 @@ class TeacherModuleController extends Controller
                     'student_code' => $s->student_code ?? ('STU' . $sid),
                     'name' => $name,
                     'email' => $s->user?->email ?? '',
-                    'department' => $s->department?->name ?? 'Academic Department',
+                    'department' => $s->department?->name ?? 'Academic Faculty',
                     'program' => $s->program?->code ?? $s->major ?? $courseCode,
                     'class_name' => $s->classRoom?->name ?? 'N/A',
-                    'year_level' => 'Year ' . ($s->year_level ?? 1),
+                    'year_level' => $ylInt !== null ? YearLevel::name($ylInt) : 'Unassigned',
+                    'year_level_number' => $ylInt,
+                    'year_level_code' => YearLevel::code($ylInt),
+                    'year_level_name' => YearLevel::name($ylInt),
+                    'year_level_khmer' => YearLevel::khmer($ylInt),
+                    'year_level_label' => YearLevel::label($ylInt),
+                    'academic_year' => $s->resolveAcademicYearName() ?? $first->semester?->academicYear?->name,
                     'course_id' => $first->course_id,
                     'course_code' => $courseCode,
                     'course_name' => $courseName,
@@ -403,9 +425,18 @@ class TeacherModuleController extends Controller
                 ];
             })
             ->filter()
-            ->filter(function ($item) use ($search, $riskFilter) {
+            ->filter(function ($item) use ($search, $riskFilter, $missingYearLevel, $targetYearLevel, $rawYearLevelFilter) {
+                if ($missingYearLevel && $item['year_level_number'] !== null) {
+                    return false;
+                }
+                if ($targetYearLevel !== null && $item['year_level_number'] !== $targetYearLevel) {
+                    return false;
+                }
+                if ($rawYearLevelFilter !== '' && ! $missingYearLevel && strtolower($rawYearLevelFilter) !== 'all' && $targetYearLevel === null) {
+                    return false;
+                }
                 if ($search !== '') {
-                    $haystack = strtolower($item['name'] . ' ' . $item['student_code'] . ' ' . $item['program'] . ' ' . $item['course_code'] . ' ' . $item['class_name']);
+                    $haystack = strtolower($item['name'] . ' ' . $item['student_code'] . ' ' . $item['program'] . ' ' . $item['course_code'] . ' ' . $item['class_name'] . ' ' . ($item['year_level_code'] ?? ''));
                     if (! str_contains($haystack, $search)) {
                         return false;
                     }
@@ -439,7 +470,7 @@ class TeacherModuleController extends Controller
                 'teacher' => [
                     'id' => $teacher->id,
                     'name' => trim($teacher->first_name . ' ' . $teacher->last_name),
-                    'department' => $teacher->department?->name ?? 'Academic Department',
+                    'department' => $teacher->department?->name ?? 'Academic Faculty',
                 ],
                 'courses' => $allCourses,
                 'students' => $studentsList,
@@ -455,7 +486,7 @@ class TeacherModuleController extends Controller
     {
         $teacher = $this->resolveTeacher($request);
 
-        $student = Student::with(['user', 'department', 'program', 'classRoom'])
+        $student = Student::with(['user', 'department', 'program', 'classRoom.academicYear', 'courseEnrollments.semester.academicYear'])
             ->where('id', $studentId)
             ->orWhere('user_id', $studentId)
             ->first();
@@ -482,7 +513,7 @@ class TeacherModuleController extends Controller
         $lateAtt = $attDetails->where('status', 'late')->count();
         $absentAtt = $attDetails->where('status', 'absent')->count();
         $excusedAtt = $attDetails->where('status', 'excused')->count();
-        $attRate = $totalAtt > 0 ? round((($presentAtt + $lateAtt) / $totalAtt) * 100, 1) : 0.0;
+        $attRate = $totalAtt > 0 ? round((($presentAtt + $lateAtt) / $totalAtt) * 100, 1) : null;
 
         $monthlyAtt = $attDetails->groupBy(fn ($r) => \Carbon\Carbon::parse($r->attendance_date)->format('M'))
             ->map(function ($rows, $month) {
@@ -496,6 +527,7 @@ class TeacherModuleController extends Controller
 
         $submissions = AssignmentSubmission::join('assignments', 'assignment_submissions.assignment_id', '=', 'assignments.id')
             ->where('assignment_submissions.student_id', $student->id)
+            ->where('assignment_submissions.is_latest', true)
             ->whereIn('assignments.course_id', $courseIds)
             ->select('assignments.title', 'assignments.assignment_type', 'assignments.total_score', 'assignment_submissions.score', 'assignment_submissions.status', 'assignment_submissions.submitted_at')
             ->orderByDesc('assignment_submissions.submitted_at')
@@ -552,8 +584,37 @@ class TeacherModuleController extends Controller
             ->whereIn('course_id', $courseIds)
             ->get();
 
-        $gpaRecord = GpaRecord::where('student_id', $student->id)->orderByDesc('semester_id')->first();
+        $gpaRecords = GpaRecord::where('student_id', $student->id)->orderBy('semester_id')->get();
+        $gpaPoints = 0.0;
+        $gpaCredits = 0.0;
+        foreach ($gpaRecords as $gr) {
+            $cr = (float) ($gr->earned_credits ?: 0.0);
+            if ($cr > 0) {
+                $gpaPoints += ((float) $gr->gpa) * $cr;
+                $gpaCredits += $cr;
+            }
+        }
+        $cumulativeGpa = $gpaCredits > 0
+            ? round($gpaPoints / $gpaCredits, 2)
+            : ($gpaRecords->isNotEmpty() ? round((float) $gpaRecords->avg('gpa'), 2) : null);
+
         $risk = RiskAssessment::where('student_id', $student->id)->orderByDesc('id')->first();
+
+        $notes = Recommendation::where('student_id', $student->id)
+            ->where(function (Builder $q) use ($courseIds) {
+                $q->whereIn('course_id', $courseIds)->orWhereNull('course_id');
+            })
+            ->latest()
+            ->get()
+            ->map(fn (Recommendation $rec) => [
+                'id' => $rec->id,
+                'title' => $rec->title,
+                'message' => $rec->message,
+                'priority' => ucfirst((string) ($rec->priority ?? 'medium')),
+                'status' => ucfirst((string) ($rec->status ?? 'pending')),
+                'date' => $rec->created_at?->format('M d, Y') ?? '-',
+            ])
+            ->values();
 
         return response()->json([
             'success' => true,
@@ -566,11 +627,17 @@ class TeacherModuleController extends Controller
                     'name' => $student->english_name ?: trim($student->first_name . ' ' . $student->last_name),
                     'email' => $student->user?->email,
                     'phone' => $student->phone,
-                    'department' => $student->department?->name ?? 'Academic Department',
-                    'program' => $student->program?->name ?? $student->major ?? 'Program',
+                    'department' => $student->department?->name ?? 'Academic Faculty',
+                    'program' => $student->program?->name ?? $student->major ?? 'Major',
                     'class_name' => $student->classRoom?->name ?? 'N/A',
-                    'year_level' => 'Year ' . ($student->year_level ?? 1),
-                    'gpa' => round((float) ($gpaRecord?->cumulative_gpa ?? $gpaRecord?->gpa ?? 0.0), 2),
+                    'year_level' => YearLevel::name($student->year_level) ?? 'Unassigned',
+                    'year_level_number' => YearLevel::parse($student->year_level),
+                    'year_level_code' => YearLevel::code($student->year_level),
+                    'year_level_name' => YearLevel::name($student->year_level),
+                    'year_level_khmer' => YearLevel::khmer($student->year_level),
+                    'year_level_label' => YearLevel::label($student->year_level),
+                    'academic_year' => $student->resolveAcademicYearName(),
+                    'gpa' => $cumulativeGpa,
                     'risk_level' => $risk?->risk_level ?? 'low',
                     'risk_score' => $risk?->risk_score ?? 0,
                     'risk_factors' => $risk?->risk_factors,
@@ -587,6 +654,7 @@ class TeacherModuleController extends Controller
                 ],
                 'scores' => $scores->values(),
                 'grades' => $grades,
+                'notes' => $notes,
             ],
         ], 200);
     }
@@ -799,6 +867,19 @@ class TeacherModuleController extends Controller
             'records.*.remarks' => 'nullable|string|max:255',
         ]);
 
+        $submittedStudentIds = array_values(array_unique(array_map(
+            fn ($rec) => (int) $rec['student_id'],
+            $validated['records']
+        )));
+        foreach ($submittedStudentIds as $sid) {
+            if (! $this->isStudentEnrolledInOffering($offering, $sid)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unauthorized access: student is not enrolled in this course offering.',
+                ], 403);
+            }
+        }
+
         $session = DB::transaction(function () use ($offering, $teacher, $validated) {
             $attendance = Attendance::updateOrCreate(
                 [
@@ -868,9 +949,14 @@ class TeacherModuleController extends Controller
                          ->where('semester_id', $offering->semester_id);
                   });
             })
-            ->withCount(['submissions as total_submissions', 'submissions as graded_submissions' => function ($q) {
-                $q->where('status', 'graded');
-            }])
+            ->withCount([
+                'submissions as total_submissions' => function ($q) {
+                    $q->where('is_latest', true);
+                },
+                'submissions as graded_submissions' => function ($q) {
+                    $q->where('is_latest', true)->where('status', 'graded');
+                },
+            ])
             ->latest()
             ->get();
 
@@ -901,6 +987,10 @@ class TeacherModuleController extends Controller
             'total_score' => 'nullable|numeric|min:1|max:1000',
             'due_date' => 'required|date',
             'status' => 'nullable|string|in:draft,published,closed',
+            'allow_late_submission' => 'nullable|boolean',
+            'allow_resubmission' => 'nullable|boolean',
+            'allow_retakes' => 'nullable|boolean',
+            'max_attempts' => 'nullable|integer|min:1|max:50',
         ]);
 
         $assignment = Assignment::create([
@@ -914,6 +1004,10 @@ class TeacherModuleController extends Controller
             'total_score' => $validated['total_score'] ?? 100,
             'due_date' => $validated['due_date'],
             'status' => $validated['status'] ?? 'published',
+            'allow_late_submission' => (bool) ($validated['allow_late_submission'] ?? false),
+            'allow_resubmission' => (bool) ($validated['allow_resubmission'] ?? false),
+            'allow_retakes' => (bool) ($validated['allow_retakes'] ?? false),
+            'max_attempts' => (int) ($validated['max_attempts'] ?? 1),
         ]);
 
         return response()->json([
@@ -941,6 +1035,10 @@ class TeacherModuleController extends Controller
             'total_score' => 'sometimes|numeric|min:1|max:1000',
             'due_date' => 'sometimes|date',
             'status' => 'sometimes|string|in:draft,published,closed',
+            'allow_late_submission' => 'sometimes|boolean',
+            'allow_resubmission' => 'sometimes|boolean',
+            'allow_retakes' => 'sometimes|boolean',
+            'max_attempts' => 'sometimes|integer|min:1|max:50',
         ]);
 
         $assignment->update($validated);
@@ -1027,6 +1125,7 @@ class TeacherModuleController extends Controller
 
         return array_merge([
             'id' => $s->id,
+            'submission_id' => $s->id,
             'student_id' => $s->student_id,
             'student_code' => $student?->student_code ?? ('STU' . $s->student_id),
             'student_name' => $studentName,
@@ -1044,6 +1143,22 @@ class TeacherModuleController extends Controller
             'raw_status' => $s->status ?? 'submitted',
             'status' => $displayStatus,
             'is_published' => $rawStatus === 'graded',
+            'version_number' => (int) ($s->version_number ?? 1),
+            'is_latest' => (bool) ($s->is_latest ?? true),
+            'is_late' => (bool) ($s->is_late ?? false),
+            'submission_text' => $s->submission_text,
+            'uploaded_files' => ! empty($fileMeta['has_file']) ? [[
+                'file_name' => $fileMeta['file_name'] ?? 'Submission file',
+                'file_extension' => $fileMeta['file_extension'] ?? null,
+                'file_type' => $fileMeta['file_type'] ?? null,
+                'mime_type' => $fileMeta['mime_type'] ?? null,
+                'file_size' => $fileMeta['file_size'] ?? null,
+                'file_size_label' => $fileMeta['file_size_label'] ?? null,
+                'preview_type' => $fileMeta['preview_type'] ?? null,
+                'file_exists' => $fileMeta['file_exists'] ?? false,
+                'view_url' => $fileMeta['view_url'] ?? null,
+                'download_url' => $fileMeta['download_url'] ?? null,
+            ]] : [],
         ], $fileMeta);
     }
 
@@ -1158,6 +1273,10 @@ class TeacherModuleController extends Controller
 
         $offering = CourseOffering::findOrFail($id);
 
+        if ($request->has('max_attempts') && ((string) $request->input('max_attempts') === '0' || $request->input('max_attempts') === '')) {
+            $request->merge(['max_attempts' => null]);
+        }
+
         $validated = $request->validate([
             'title' => 'required|string|max:200',
             'description' => 'nullable|string',
@@ -1165,6 +1284,9 @@ class TeacherModuleController extends Controller
             'total_score' => 'nullable|numeric|min:1|max:1000',
             'start_at' => 'nullable|date',
             'end_at' => 'nullable|date',
+            'max_attempts' => ['nullable', 'integer', \Illuminate\Validation\Rule::in(\App\Models\Quiz::ALLOWED_MAX_ATTEMPTS)],
+            'scoring_method' => ['nullable', 'string', \Illuminate\Validation\Rule::in(\App\Models\Quiz::SCORING_METHODS)],
+            'allow_late_submission' => 'nullable|boolean',
             'status' => 'nullable|string|in:draft,published,closed',
         ]);
 
@@ -1189,6 +1311,9 @@ class TeacherModuleController extends Controller
             'total_score' => $validated['total_score'] ?? 0,
             'start_at' => $validated['start_at'] ?? now(),
             'end_at' => $validated['end_at'] ?? now()->addDays(7),
+            'max_attempts' => array_key_exists('max_attempts', $validated) ? $validated['max_attempts'] : 1,
+            'scoring_method' => $validated['scoring_method'] ?? 'highest',
+            'allow_late_submission' => (bool) ($validated['allow_late_submission'] ?? false),
             'status' => 'draft',
         ]);
 
@@ -1219,15 +1344,38 @@ class TeacherModuleController extends Controller
         $offeringIds = $offerings->pluck('id')->all();
         $courseIds = $offerings->pluck('course_id')->filter()->unique()->all();
 
-        $assignments = Assignment::with(['course', 'courseOffering.classRoom'])
+        $enrollments = CourseEnrollment::with(['student.user', 'student.classRoom'])
+            ->where(function ($q) use ($offeringIds, $offerings) {
+                $q->whereIn('course_offering_id', $offeringIds);
+                foreach ($offerings as $off) {
+                    $q->orWhere(function ($sq) use ($off) {
+                        $sq->whereNull('course_offering_id')
+                           ->where('course_id', $off->course_id)
+                           ->where('semester_id', $off->semester_id);
+                    });
+                }
+            })
+            ->get();
+
+        $assignmentModels = Assignment::with(['course', 'courseOffering.classRoom'])
             ->whereIn('course_offering_id', $offeringIds)
             ->withCount([
-                'submissions as total_submissions',
-                'submissions as graded_submissions' => fn ($q) => $q->where('status', 'graded'),
-                'submissions as pending_submissions' => fn ($q) => $q->whereNull('score'),
+                'submissions as total_submissions' => fn ($q) => $q->where('is_latest', true),
+                'submissions as graded_submissions' => fn ($q) => $q->where('is_latest', true)->where('status', 'graded'),
+                'submissions as pending_submissions' => fn ($q) => $q->where('is_latest', true)->whereNull('score'),
             ])
             ->latest('due_date')
-            ->get()
+            ->get();
+
+        $assignmentOverrideCounts = \App\Models\AssessmentStudentOverride::query()
+            ->whereIn('assessment_type', ['assignment', 'homework'])
+            ->whereIn('assessment_id', $assignmentModels->pluck('id')->all())
+            ->where('is_active', true)
+            ->selectRaw('assessment_id, COUNT(*) as cnt')
+            ->groupBy('assessment_id')
+            ->pluck('cnt', 'assessment_id');
+
+        $assignments = $assignmentModels
             ->map(fn (Assignment $a) => [
                 'id' => $a->id,
                 'code' => 'ASN-' . $a->id,
@@ -1245,15 +1393,26 @@ class TeacherModuleController extends Controller
                 'total_submissions' => $a->total_submissions,
                 'graded_submissions' => $a->graded_submissions,
                 'pending_submissions' => $a->pending_submissions,
+                'allow_late_submission' => (bool) $a->allow_late_submission,
+                'allow_resubmission' => (bool) $a->allow_resubmission,
+                'reopened_until' => $a->reopened_until?->toIso8601String(),
+                'max_attempts' => (int) ($a->max_attempts ?? 1),
+                'allow_retakes' => (bool) $a->allow_retakes,
+                'overrides_count' => (int) ($assignmentOverrideCounts[$a->id] ?? 0),
             ]);
 
-        $quizzes = Quiz::with(['course', 'courseOffering.classRoom'])
+        $quizModels = Quiz::with(['course', 'courseOffering.classRoom'])
             ->whereIn('course_offering_id', $offeringIds)
-            ->withCount(['questions', 'attempts'])
+            ->withCount([
+                'questions',
+                'attempts' => fn ($q) => $q->where('is_reset', false),
+                'attempts as pending_grading_count' => fn ($q) => $q->where('is_reset', false)->where('grading_status', 'pending_grading'),
+            ])
             ->withSum('questions as questions_total_marks', 'marks')
             ->latest('start_at')
-            ->get()
-            ->map(fn (Quiz $qz) => [
+            ->get();
+
+        $quizzes = $quizModels->map(fn (Quiz $qz) => [
                 'id' => $qz->id,
                 'code' => 'QZ-' . $qz->id,
                 'title' => $qz->title,
@@ -1266,7 +1425,13 @@ class TeacherModuleController extends Controller
                 'course_name' => $qz->course?->name ?? $qz->course?->course_name ?? 'Course',
                 'questions_count' => $qz->questions_count,
                 'attempts_count' => $qz->attempts_count,
+                'pending_grading_count' => (int) ($qz->pending_grading_count ?? 0),
                 'duration_minutes' => $qz->duration_minutes ?? 30,
+                'start_at' => $qz->start_at?->toIso8601String(),
+                'end_at' => $qz->end_at?->toIso8601String(),
+                'max_attempts' => $qz->max_attempts !== null && (int) $qz->max_attempts > 0 ? (int) $qz->max_attempts : null,
+                'scoring_method' => $qz->scoring_method ?: 'highest',
+                'allow_late_submission' => (bool) $qz->allow_late_submission,
                 'total_score' => (float) ($qz->total_score ?? 100),
                 'status' => ucfirst($qz->status ?? 'published'),
             ]);
@@ -1277,6 +1442,7 @@ class TeacherModuleController extends Controller
                 'assignment.course',
                 'assignment.courseOffering.classRoom',
             ])
+            ->where('is_latest', true)
             ->whereHas('assignment', fn ($q) => $q->whereIn('course_offering_id', $offeringIds))
             ->latest('submitted_at')
             ->take(50)
@@ -1284,47 +1450,298 @@ class TeacherModuleController extends Controller
             ->map(fn (AssignmentSubmission $s) => $this->presentSubmission($s));
 
         $exams = Exam::with(['course', 'courseOffering.classRoom'])
-            ->whereIn('course_offering_id', $offeringIds)
+            ->where(function ($q) use ($offeringIds, $offerings) {
+                $q->whereIn('course_offering_id', $offeringIds);
+                foreach ($offerings as $off) {
+                    $q->orWhere(function ($sq) use ($off) {
+                        $sq->whereNull('course_offering_id')
+                           ->where('course_id', $off->course_id)
+                           ->where('semester_id', $off->semester_id);
+                    });
+                }
+            })
             ->withCount('results')
             ->latest('exam_date')
             ->get()
-            ->map(fn (Exam $ex) => [
-                'id' => $ex->id,
-                'code' => 'EX-' . $ex->id,
-                'title' => $ex->title,
-                'course_offering_id' => $ex->course_offering_id,
-                'class_name' => $ex->courseOffering?->classRoom?->name,
-                'raw_status' => $ex->status,
-                'venue' => $ex->venue,
-                'duration_minutes' => $ex->duration_minutes,
-                'exam_type' => ucfirst($ex->exam_type ?? 'Final'),
-                'course_code' => $ex->course?->code ?? $ex->course?->course_code ?? 'COURSE',
-                'course_name' => $ex->course?->name ?? $ex->course?->course_name ?? 'Course',
-                'exam_date' => $ex->exam_date ? \Carbon\Carbon::parse($ex->exam_date)->format('M d, Y') : '-',
-                'total_score' => (float) ($ex->total_score ?? 100),
-                'results_count' => $ex->results_count,
-            ]);
+            ->map(function (Exam $ex) use ($enrollments) {
+                $offeringStudentsCount = $enrollments->filter(fn ($e) =>
+                    $e->course_offering_id == $ex->course_offering_id ||
+                    ($e->course_id == $ex->course_id && $e->semester_id == $ex->semester_id)
+                )->count();
 
-        $grades = Grade::with(['student.classRoom', 'course'])
-            ->whereIn('course_offering_id', $offeringIds)
+                return [
+                    'id' => $ex->id,
+                    'code' => 'EX-' . $ex->id,
+                    'title' => $ex->title,
+                    'course_offering_id' => $ex->course_offering_id,
+                    'class_name' => $ex->courseOffering?->classRoom?->name,
+                    'raw_status' => $ex->status,
+                    'venue' => $ex->venue,
+                    'duration_minutes' => $ex->duration_minutes,
+                    'exam_type' => ucfirst($ex->exam_type ?? 'Final'),
+                    'course_id' => $ex->course_id,
+                    'course_code' => $ex->course?->code ?? $ex->course?->course_code ?? 'COURSE',
+                    'course_name' => $ex->course?->name ?? $ex->course?->course_name ?? 'Course',
+                    'exam_date' => $ex->exam_date ? \Carbon\Carbon::parse($ex->exam_date)->format('M d, Y') : '-',
+                    'start_time' => $ex->start_time,
+                    'end_time' => $ex->end_time,
+                    'display_status' => $ex->displayStatus($ex->results_count),
+                    'total_score' => (float) ($ex->total_score ?? 100),
+                    'results_count' => $ex->results_count,
+                    'total_students' => max(1, $offeringStudentsCount),
+                    'is_published' => $ex->isResultsPublished(),
+                    'results_published_at' => $ex->results_published_at?->toIso8601String(),
+                    'status' => $ex->isResultsPublished() ? 'Published' : 'Pending',
+                ];
+            });
+
+        $rawGrades = Grade::with(['student.classRoom', 'course', 'courseOffering.classRoom'])
+            ->where(function (Builder $q) use ($offeringIds, $offerings) {
+                $q->whereIn('course_offering_id', $offeringIds);
+                foreach ($offerings as $off) {
+                    $q->orWhere(function (Builder $sq) use ($off) {
+                        $sq->whereNull('course_offering_id')
+                           ->where('course_id', $off->course_id)
+                           ->where('semester_id', $off->semester_id);
+                    });
+                }
+            })
             ->latest()
             ->take(100)
-            ->get()
-            ->map(fn (Grade $g) => [
-                'id' => $g->id,
-                'student_id' => $g->student_id,
-                'student_code' => $g->student?->student_code ?? ('STU' . $g->student_id),
-                'student_name' => $g->student?->english_name ?: trim(($g->student?->first_name ?? '') . ' ' . ($g->student?->last_name ?? '')),
-                'course_code' => $g->course?->code ?? $g->course?->course_code ?? 'COURSE',
-                'assignment_score' => (float) ($g->assignment_score ?? 0),
-                'quiz_score' => (float) ($g->quiz_score ?? 0),
-                'attendance_score' => (float) ($g->attendance_score ?? 0),
-                'midterm_score' => (float) ($g->midterm_score ?? 0),
-                'final_exam_score' => (float) ($g->final_exam_score ?? 0),
-                'total_score' => (float) ($g->total_score ?? 0),
-                'letter_grade' => $g->letter_grade ?? 'N/A',
-                'grade_point' => (float) ($g->grade_point ?? 0),
+            ->get();
+
+        $existingGradeMap = $rawGrades->keyBy(fn ($g) => $g->student_id . '_' . $g->course_id);
+
+        $grades = $rawGrades->map(fn (Grade $g) => [
+            'id' => $g->id,
+            'student_id' => $g->student_id,
+            'student_code' => $g->student?->student_code ?? ('STU' . $g->student_id),
+            'student_name' => $g->student?->english_name ?: trim(($g->student?->first_name ?? '') . ' ' . ($g->student?->last_name ?? '')),
+            'course_id' => $g->course_id,
+            'course_code' => $g->course?->code ?? $g->course?->course_code ?? 'COURSE',
+            'course_name' => $g->course?->name ?? $g->course?->course_name ?? 'Course',
+            'class_name' => $g->courseOffering?->classRoom?->name ?? $g->student?->classRoom?->name ?? 'Class',
+            'assignment_score' => (float) ($g->assignment_score ?? 0),
+            'quiz_score' => (float) ($g->quiz_score ?? 0),
+            'attendance_score' => (float) ($g->attendance_score ?? 0),
+            'midterm_score' => (float) ($g->midterm_score ?? 0),
+            'final_exam_score' => (float) ($g->final_exam_score ?? 0),
+            'total_score' => (float) ($g->total_score ?? 0),
+            'letter_grade' => $g->letter_grade ?? 'N/A',
+            'grade_point' => (float) ($g->grade_point ?? 0),
+        ]);
+
+        $quizIds = $quizModels->pluck('id');
+        $quizAttemptsByStudentQuiz = $quizIds->isNotEmpty()
+            ? QuizAttempt::whereIn('quiz_id', $quizIds)
+                ->where('is_reset', false)
+                ->get()
+                ->groupBy('student_id')
+            : collect();
+
+        $computedStudentGrades = collect();
+        foreach ($enrollments as $enr) {
+            $st = $enr->student;
+            if (! $st) continue;
+            $key = $st->id . '_' . $enr->course_id;
+            if ($existingGradeMap->has($key)) continue;
+
+            $stSubmissions = $submissions->where('student_id', $st->id);
+            $stAsnScore = $stSubmissions->count() > 0 ? (float) ($stSubmissions->avg('score') ?? 0) : 0.0;
+
+            $stQuizModels = $quizModels->filter(function (Quiz $qz) use ($enr) {
+                if ($enr->course_offering_id && $qz->course_offering_id) {
+                    return (int) $qz->course_offering_id === (int) $enr->course_offering_id;
+                }
+
+                return (int) $qz->course_id === (int) $enr->course_id;
+            });
+            $stAttempts = $quizAttemptsByStudentQuiz->get($st->id, collect());
+            $stQuizPctScores = [];
+            foreach ($stQuizModels as $qzModel) {
+                $qzAttempts = $stAttempts->where('quiz_id', $qzModel->id);
+                $rawScore = $this->quizGrading->calculateStudentQuizScore($qzModel, $qzAttempts);
+                if ($rawScore !== null) {
+                    $denom = (float) ($qzModel->questions_total_marks ?: $qzModel->total_score ?: 100);
+                    $stQuizPctScores[] = $denom > 0 ? min(100.0, ($rawScore / $denom) * 100.0) : (float) $rawScore;
+                }
+            }
+            $stQuizScore = count($stQuizPctScores) > 0 ? round(array_sum($stQuizPctScores) / count($stQuizPctScores), 1) : 0.0;
+
+            $stExamResults = ExamResult::where('student_id', $st->id)->whereIn('exam_id', $exams->pluck('id'))->get();
+            $midtermRes = $stExamResults->first(fn ($r) => str_contains(strtolower($r->exam?->title ?? ''), 'midterm'));
+            $finalRes = $stExamResults->first(fn ($r) => str_contains(strtolower($r->exam?->title ?? ''), 'final'));
+            $midScore = $midtermRes?->score !== null ? (float) $midtermRes->score : ($stExamResults->first()?->score !== null ? (float) $stExamResults->first()->score : 0.0);
+            $finScore = $finalRes?->score !== null ? (float) $finalRes->score : 0.0;
+
+            $total = round(($stAsnScore * 0.35) + ($midScore * 0.30) + ($finScore * 0.35), 1);
+            [$letter, $gp] = match (true) {
+                $total >= 90 => ['A', 4.0],
+                $total >= 85 => ['A-', 3.7],
+                $total >= 80 => ['B+', 3.3],
+                $total >= 75 => ['B', 3.0],
+                $total >= 70 => ['B-', 2.7],
+                $total >= 65 => ['C+', 2.3],
+                $total >= 60 => ['C', 2.0],
+                $total >= 50 => ['D', 1.0],
+                default => $total > 0 ? ['F', 0.0] : ['N/A', 0.0],
+            };
+
+            $computedStudentGrades->push([
+                'id' => 0,
+                'student_id' => $st->id,
+                'student_code' => $st->student_code ?? ('STU' . $st->id),
+                'student_name' => $st->english_name ?: trim(($st->first_name ?? '') . ' ' . ($st->last_name ?? '')),
+                'course_id' => $enr->course_id,
+                'course_code' => $enr->courseOffering?->course?->code ?? 'COURSE',
+                'course_name' => $enr->courseOffering?->course?->name ?? 'Course',
+                'class_name' => $enr->courseOffering?->classRoom?->name ?? $st->classRoom?->name ?? 'Class',
+                'assignment_score' => $stAsnScore,
+                'quiz_score' => $stQuizScore,
+                'attendance_score' => 100.0,
+                'midterm_score' => $midScore,
+                'final_exam_score' => $finScore,
+                'total_score' => $total,
+                'letter_grade' => $letter,
+                'grade_point' => $gp,
             ]);
+        }
+        $allGrades = $grades->concat($computedStudentGrades)->values();
+
+        // Course Progress per Offering
+        $courseProgress = $offerings->map(function ($offering) use ($assignments, $quizzes, $exams, $enrollments) {
+            $offeringAssignments = $assignments->where('course_offering_id', $offering->id);
+            $offeringQuizzes = $quizzes->where('course_offering_id', $offering->id);
+            $offeringExams = $exams->where('course_offering_id', $offering->id);
+
+            $totalAssessmentsCount = $offeringAssignments->count() + $offeringQuizzes->count() + $offeringExams->count();
+
+            $totalSubmissions = (int) $offeringAssignments->sum('total_submissions');
+            $gradedSubmissions = (int) $offeringAssignments->sum('graded_submissions');
+
+            $offeringEnrolledCount = $enrollments->filter(fn ($e) =>
+                $e->course_offering_id == $offering->id ||
+                ($e->course_id == $offering->course_id && $e->semester_id == $offering->semester_id)
+            )->count();
+
+            $expectedExamResults = $offeringExams->count() * max(1, $offeringEnrolledCount);
+            $gradedExamResults = (int) $offeringExams->sum('results_count');
+
+            $totalWork = $totalSubmissions + $expectedExamResults;
+            $gradedWork = $gradedSubmissions + $gradedExamResults;
+
+            $progressPercent = $totalWork > 0 ? round(($gradedWork / $totalWork) * 100, 1) : 100.0;
+            if ($progressPercent > 100.0) $progressPercent = 100.0;
+
+            return [
+                'offering_id' => $offering->id,
+                'course_id' => $offering->course_id,
+                'course_code' => $offering->course?->code ?? $offering->course?->course_code ?? 'COURSE',
+                'course_name' => $offering->course?->name ?? $offering->course?->course_name ?? 'Course',
+                'class_name' => $offering->classRoom?->name ?? 'Class',
+                'total_assessments' => $totalAssessmentsCount,
+                'total_work' => $totalWork,
+                'graded_work' => $gradedWork,
+                'progress_percent' => $progressPercent,
+            ];
+        })->values();
+
+        // Consolidated Pending Assessments List
+        $pendingList = collect();
+
+        $pendingSubmissionsList = $submissions->where('score', null);
+        foreach ($pendingSubmissionsList as $sub) {
+            $pendingList->push([
+                'id' => 'SUB-' . ($sub['id'] ?? 0),
+                'assessment_id' => $sub['assignment_id'] ?? 0,
+                'submission_id' => $sub['id'] ?? 0,
+                'type' => 'Assignment',
+                'title' => ($sub['assignment_title'] ?? 'Assignment') . ' — ' . ($sub['student_name'] ?? 'Student'),
+                'course_id' => $sub['course_id'] ?? null,
+                'course_code' => $sub['course_code'] ?? 'COURSE',
+                'course_name' => $sub['course_name'] ?? 'Course',
+                'class_name' => $sub['class_name'] ?? 'Class',
+                'max_score' => (int) ($sub['total_score'] ?? 100),
+                'due_date' => $sub['submitted_at'] ?? '-',
+                'due_status' => 'Needs Grading',
+                'is_overdue' => false,
+                'completed_count' => 0,
+                'total_students' => 1,
+                'status' => 'Submitted',
+            ]);
+        }
+
+        if ($pendingSubmissionsList->isEmpty()) {
+            foreach ($assignments->where('pending_submissions', '>', 0) as $a) {
+                $pendingList->push([
+                    'id' => 'ASN-' . $a['id'],
+                    'assessment_id' => $a['id'],
+                    'submission_id' => 0,
+                    'type' => 'Assignment',
+                    'title' => $a['title'],
+                    'course_id' => $a['course_id'] ?? null,
+                    'course_code' => $a['course_code'],
+                    'course_name' => $a['course_name'],
+                    'class_name' => $a['class_name'],
+                    'max_score' => (int) $a['total_score'],
+                    'due_date' => $a['due_date'],
+                    'due_status' => $a['pending_submissions'] . ' to grade',
+                    'is_overdue' => false,
+                    'completed_count' => (int) $a['graded_submissions'],
+                    'total_students' => max(1, (int) $a['total_submissions']),
+                    'status' => $a['status'],
+                ]);
+            }
+        }
+
+        foreach ($exams as $ex) {
+            $isPending = !$ex['is_published'] || ($ex['results_count'] < $ex['total_students']);
+            if ($isPending) {
+                $pendingList->push([
+                    'id' => 'EX-' . $ex['id'],
+                    'assessment_id' => $ex['id'],
+                    'submission_id' => 0,
+                    'type' => 'Exam',
+                    'title' => $ex['title'] . ' (' . ($ex['exam_type'] ?? 'Exam') . ')',
+                    'course_id' => $ex['course_id'] ?? null,
+                    'course_code' => $ex['course_code'],
+                    'course_name' => $ex['course_name'],
+                    'class_name' => $ex['class_name'],
+                    'max_score' => (int) $ex['total_score'],
+                    'due_date' => $ex['exam_date'],
+                    'due_status' => !$ex['is_published'] ? 'Unpublished' : ($ex['results_count'] . '/' . $ex['total_students'] . ' graded'),
+                    'is_overdue' => false,
+                    'completed_count' => (int) $ex['results_count'],
+                    'total_students' => (int) $ex['total_students'],
+                    'status' => !$ex['is_published'] ? 'Pending Publishing' : 'Graded',
+                ]);
+            }
+        }
+
+        foreach ($quizzes as $qz) {
+            $pendingGradingCount = (int) ($qz['pending_grading_count'] ?? 0);
+            $pendingList->push([
+                'id' => 'QZ-' . $qz['id'],
+                'assessment_id' => $qz['id'],
+                'submission_id' => 0,
+                'type' => 'Quiz',
+                'title' => $qz['title'],
+                'course_id' => $qz['course_id'] ?? null,
+                'course_code' => $qz['course_code'],
+                'course_name' => $qz['course_name'],
+                'class_name' => $qz['class_name'],
+                'max_score' => (int) ($qz['total_marks'] > 0 ? $qz['total_marks'] : $qz['total_score']),
+                'due_date' => $qz['end_at'] ?: '-',
+                'due_status' => $pendingGradingCount > 0
+                    ? ($pendingGradingCount . ' pending grading')
+                    : ($qz['attempts_count'] . ' attempts'),
+                'is_overdue' => false,
+                'completed_count' => (int) $qz['attempts_count'],
+                'pending_grading_count' => $pendingGradingCount,
+                'total_students' => max(1, (int) $qz['attempts_count']),
+                'status' => $pendingGradingCount > 0 ? 'Pending Grading' : $qz['status'],
+            ]);
+        }
 
         $allCourses = $this->authService->getAuthorizedOfferingsQuery($teacher)
             ->with('course')
@@ -1338,22 +1755,37 @@ class TeacherModuleController extends Controller
             ->unique('course_id')
             ->values();
 
+        $totalAssignments = $assignments->count();
+        $totalQuizzes = $quizzes->count();
+        $totalExams = $exams->count();
+        $totalAssessments = $totalAssignments + $totalQuizzes + $totalExams;
+        $completedGradedCount = (int) $assignments->sum('graded_submissions') + (int) $exams->sum('results_count');
+        $validScores = $allGrades->where('total_score', '>', 0);
+        $avgScore = $validScores->count() > 0 ? round($validScores->avg('total_score'), 1) : 0.0;
+
         return response()->json([
             'success' => true,
             'message' => 'Teacher assessments overview retrieved successfully.',
             'data' => [
                 'courses' => $allCourses,
                 'summary' => [
-                    'total_assignments' => $assignments->count(),
-                    'total_quizzes' => $quizzes->count(),
-                    'total_exams' => $exams->count(),
+                    'total_assignments' => $totalAssignments,
+                    'total_quizzes' => $totalQuizzes,
+                    'total_exams' => $totalExams,
+                    'total_assessments' => $totalAssessments,
                     'pending_submissions' => $submissions->where('score', null)->count(),
+                    'pending_quiz_gradings' => (int) $quizzes->sum('pending_grading_count'),
+                    'pending_scores_count' => $pendingList->count(),
+                    'completed_graded_count' => $completedGradedCount,
+                    'average_class_score' => $avgScore,
                 ],
                 'assignments' => $assignments,
                 'quizzes' => $quizzes,
                 'submissions' => $submissions,
                 'exams' => $exams,
-                'gradebook' => $grades,
+                'gradebook' => $allGrades,
+                'course_progress' => $courseProgress,
+                'pending_assessments' => $pendingList->values(),
             ],
         ]);
     }
@@ -1414,6 +1846,13 @@ class TeacherModuleController extends Controller
             'total_score' => 'nullable|numeric|min:0|max:100',
         ]);
 
+        if (! $this->isStudentEnrolledInOffering($offering, (int) $validated['student_id'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized access: student is not enrolled in this course offering.',
+            ], 403);
+        }
+
         $total = $validated['total_score'] ?? round(
             ((float) ($validated['assignment_score'] ?? 0) * 0.20) +
             ((float) ($validated['quiz_score'] ?? 0) * 0.15) +
@@ -1471,9 +1910,13 @@ class TeacherModuleController extends Controller
             ->groupBy('student_id')
             ->pluck('id');
 
-        $risks = RiskAssessment::with(['student.user', 'student.classRoom', 'course'])
-            ->whereIn('id', $latestRiskIds)
-            ->get();
+        $risksQuery = RiskAssessment::with(['student.user', 'student.classRoom.academicYear', 'course'])
+            ->whereIn('id', $latestRiskIds);
+        if ($request->filled('year_level') && strtolower((string) $request->query('year_level')) !== 'all') {
+            $ylFilter = $request->query('year_level');
+            $risksQuery->whereHas('student', fn (Builder $sq) => $sq->forYearLevel($ylFilter));
+        }
+        $risks = $risksQuery->get();
 
         $lowCount = $risks->where('risk_level', 'low')->count();
         $medCount = $risks->where('risk_level', 'medium')->count();
@@ -1491,6 +1934,10 @@ class TeacherModuleController extends Controller
                     'name' => $s?->english_name ?: trim(($s?->first_name ?? '') . ' ' . ($s?->last_name ?? '')),
                     'email' => $s?->user?->email ?? '',
                     'class_name' => $s?->classRoom?->name ?? 'Class',
+                    'year_level' => YearLevel::name($s?->year_level) ?? 'Unassigned',
+                    'year_level_code' => YearLevel::code($s?->year_level),
+                    'year_level_label' => YearLevel::label($s?->year_level),
+                    'academic_year' => $s?->resolveAcademicYearName(),
                     'course_code' => $r->course?->code ?? $r->course?->course_code ?? 'COURSE',
                     'risk_level' => ucfirst($r->risk_level) . ' Risk',
                     'risk_score' => (float) $r->risk_score,
@@ -1498,7 +1945,8 @@ class TeacherModuleController extends Controller
                 ];
             })->values();
 
-        $grades = Grade::whereIn('course_id', $courseIds)->pluck('total_score')->filter();
+        $gradeRows = Grade::whereIn('course_id', $courseIds)->whereNotNull('total_score')->get(['student_id', 'course_id', 'semester_id', 'total_score']);
+        $grades = $gradeRows->pluck('total_score')->filter(fn ($s) => $s !== null);
         $scoreBuckets = [
             '90-100' => $grades->filter(fn ($s) => $s >= 90)->count(),
             '80-89' => $grades->filter(fn ($s) => $s >= 80 && $s < 90)->count(),
@@ -1507,20 +1955,108 @@ class TeacherModuleController extends Controller
             '<60' => $grades->filter(fn ($s) => $s < 60)->count(),
         ];
 
-        $predictions = Prediction::with(['student', 'course'])
+        $gradesByExact = $gradeRows->groupBy(fn ($g) => $g->student_id . ':' . $g->course_id . ':' . ($g->semester_id ?? ''));
+        $gradesByCourse = $gradeRows->groupBy(fn ($g) => $g->student_id . ':' . $g->course_id);
+
+        $evalPairs = [];
+        $predictionModels = Prediction::with(['student', 'course'])
             ->whereIn('course_id', $courseIds)
             ->latest('prediction_date')
-            ->get()
-            ->map(fn (Prediction $p) => [
+            ->get();
+
+        $predictions = $predictionModels->map(function (Prediction $p) use ($gradesByExact, $gradesByCourse, &$evalPairs) {
+            $exactKey = $p->student_id . ':' . $p->course_id . ':' . ($p->semester_id ?? '');
+            $fallbackKey = $p->student_id . ':' . $p->course_id;
+            $matched = $gradesByExact->get($exactKey)?->first() ?? $gradesByCourse->get($fallbackKey)?->first();
+            $actualScore = $matched && $matched->total_score !== null ? (float) $matched->total_score : null;
+            $version = $p->model_version ?? 'v1.0';
+            $dateStr = $p->prediction_date ? (string) $p->prediction_date : '';
+
+            if ($actualScore !== null) {
+                $evalPairs[] = [
+                    'actual' => $actualScore,
+                    'predicted' => (float) $p->predicted_score,
+                    'model_version' => $version,
+                    'date' => $dateStr,
+                ];
+            }
+
+            return [
                 'id' => $p->id,
                 'student_code' => $p->student?->student_code ?? ('STU' . $p->student_id),
                 'student_name' => $p->student?->english_name ?: trim(($p->student?->first_name ?? '') . ' ' . ($p->student?->last_name ?? '')),
                 'course_code' => $p->course?->code ?? $p->course?->course_code ?? 'COURSE',
                 'predicted_score' => (float) $p->predicted_score,
-                'confidence' => round(((float) ($p->confidence_score ?? 0.85)) * 100),
-                'model_version' => $p->model_version ?? 'v1.0',
-                'date' => (string) $p->prediction_date,
-            ]);
+                'actual_score' => $actualScore,
+                'confidence' => $p->confidence_score !== null ? round(((float) $p->confidence_score) * 100) : null,
+                'model_version' => $version,
+                'date' => $dateStr,
+            ];
+        });
+
+        $computeMetrics = function (array $pairList): array {
+            $n = count($pairList);
+            if ($n === 0) {
+                return ['mae' => null, 'rmse' => null, 'r2' => null, 'sample_count' => 0];
+            }
+            $sumAbs = 0.0;
+            $sumSq = 0.0;
+            $sumAct = 0.0;
+            foreach ($pairList as $pair) {
+                $err = $pair['actual'] - $pair['predicted'];
+                $sumAbs += abs($err);
+                $sumSq += $err * $err;
+                $sumAct += $pair['actual'];
+            }
+            $meanAct = $sumAct / $n;
+            $ssTot = 0.0;
+            foreach ($pairList as $pair) {
+                $diff = $pair['actual'] - $meanAct;
+                $ssTot += $diff * $diff;
+            }
+            return [
+                'mae' => round($sumAbs / $n, 2),
+                'rmse' => round(sqrt($sumSq / $n), 2),
+                'r2' => $ssTot > 0 ? round(1.0 - ($sumSq / $ssTot), 2) : null,
+                'sample_count' => $n,
+            ];
+        };
+
+        $overallEval = $computeMetrics($evalPairs);
+        $modelsBreakdown = collect($evalPairs)->groupBy('model_version')->map(function ($group, $ver) use ($computeMetrics) {
+            $m = $computeMetrics($group->all());
+            return [
+                'model_version' => $ver,
+                'mae' => $m['mae'],
+                'rmse' => $m['rmse'],
+                'r2' => $m['r2'],
+                'sample_count' => $m['sample_count'],
+            ];
+        })->values()->all();
+        $recentEvaluations = collect($evalPairs)->groupBy(fn ($i) => $i['date'] . '|' . $i['model_version'])
+            ->map(function ($group, $k) use ($computeMetrics) {
+                [$dt, $ver] = explode('|', $k, 2);
+                $m = $computeMetrics($group->all());
+                return [
+                    'date' => $dt !== '' ? $dt : '-',
+                    'model_version' => $ver,
+                    'title' => "Model {$ver} ({$m['sample_count']} samples)",
+                    'mae' => $m['mae'],
+                    'rmse' => $m['rmse'],
+                    'r2' => $m['r2'],
+                    'sample_count' => $m['sample_count'],
+                ];
+            })->values()->take(10)->all();
+        $evaluationSummary = [
+            'has_evaluation' => $overallEval['sample_count'] > 0,
+            'mae' => $overallEval['mae'],
+            'rmse' => $overallEval['rmse'],
+            'r2' => $overallEval['r2'],
+            'sample_count' => $overallEval['sample_count'],
+            'model_version' => $modelsBreakdown[0]['model_version'] ?? ($predictionModels->first()?->model_version ?? null),
+            'models' => $modelsBreakdown,
+            'recent_evaluations' => $recentEvaluations,
+        ];
 
         $courseRisks = \App\Models\Course::whereIn('id', $courseIds)->get()->map(function ($c) {
             $cRisks = RiskAssessment::where('course_id', $c->id)->get();
@@ -1569,6 +2105,7 @@ class TeacherModuleController extends Controller
                 'at_risk_students' => $atRiskStudents,
                 'predictions' => $predictions,
                 'has_predictions' => $predictions->isNotEmpty(),
+                'evaluation' => $evaluationSummary,
                 'course_risks' => $courseRisks,
                 'recommendations' => $recommendations,
             ],
@@ -1623,7 +2160,11 @@ class TeacherModuleController extends Controller
         $teacher = $this->resolveTeacher($request);
         $rec = Recommendation::findOrFail($id);
 
-        if ($rec->course_id && ! $this->authService->isCourseAuthorized($teacher, (int) $rec->course_id)) {
+        if ($rec->course_id) {
+            if (! $this->authService->isCourseAuthorized($teacher, (int) $rec->course_id)) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized to update this recommendation.'], 403);
+            }
+        } elseif (! $rec->student_id || ! $this->authService->isStudentAuthorized($teacher, (int) $rec->student_id)) {
             return response()->json(['success' => false, 'message' => 'Unauthorized to update this recommendation.'], 403);
         }
 
@@ -1638,5 +2179,29 @@ class TeacherModuleController extends Controller
             'message' => 'Recommendation updated successfully.',
             'data' => $rec->fresh(),
         ], 200);
+    }
+
+    private function isStudentEnrolledInOffering(CourseOffering $offering, int $studentId): bool
+    {
+        $offeringEnrollmentsQuery = CourseEnrollment::query()
+            ->where(function (Builder $q) use ($offering) {
+                $q->where('course_offering_id', $offering->id);
+                if ($offering->course_id && $offering->semester_id) {
+                    $q->orWhere(function (Builder $sq) use ($offering) {
+                        $sq->whereNull('course_offering_id')
+                            ->where('course_id', $offering->course_id)
+                            ->where('semester_id', $offering->semester_id);
+                    });
+                }
+            });
+
+        if ((clone $offeringEnrollmentsQuery)->exists()) {
+            return (clone $offeringEnrollmentsQuery)
+                ->where('student_id', $studentId)
+                ->exists();
+        }
+
+        return $offering->class_id !== null
+            && Student::where('id', $studentId)->where('class_id', $offering->class_id)->exists();
     }
 }

@@ -3,6 +3,8 @@
 namespace App\Models;
 
 use App\Support\PersonNameHelper;
+use App\Support\YearLevel;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -37,6 +39,13 @@ class Student extends Model
         'current_address',
         'major',
         'year_level',
+        'current_academic_year_id',
+        'current_semester_id',
+        'current_study_year',
+        'current_semester_number',
+        'curriculum_version',
+        'progression_status',
+        'last_progressed_at',
         'advisor',
         'enrollment_date',
         'status',
@@ -44,9 +53,16 @@ class Student extends Model
 
     /**
      * Keeps the pre-existing API response key `student_id`
-     * while the database column is `student_code`.
+     * while the database column is `student_code`, plus standardized Year Level fields.
      */
-    protected $appends = ['student_id', 'current_address'];
+    protected $appends = [
+        'student_id',
+        'current_address',
+        'year_level_code',
+        'year_level_name',
+        'year_level_khmer',
+        'year_level_label',
+    ];
 
     protected static function booted(): void
     {
@@ -58,6 +74,20 @@ class Student extends Model
             if (empty($student->student_code)) {
                 $nextId = (static::withTrashed()->max('id') ?? 0) + 1;
                 $student->student_code = 'STD' . str_pad((string) $nextId, 3, '0', STR_PAD_LEFT);
+            }
+        });
+
+        static::saving(function (Student $student) {
+            if (array_key_exists('year_level', $student->attributes) && $student->attributes['year_level'] !== null) {
+                $raw = trim((string) $student->attributes['year_level']);
+                if ($raw === '') {
+                    $student->attributes['year_level'] = null;
+                } else {
+                    $canonical = YearLevel::storageValue($raw);
+                    if ($canonical !== null) {
+                        $student->attributes['year_level'] = $canonical;
+                    }
+                }
             }
         });
     }
@@ -72,6 +102,11 @@ class Student extends Model
         return [
             'date_of_birth' => 'date:Y-m-d',
             'enrollment_date' => 'date:Y-m-d',
+            'current_academic_year_id' => 'integer',
+            'current_semester_id' => 'integer',
+            'current_study_year' => 'integer',
+            'current_semester_number' => 'integer',
+            'last_progressed_at' => 'datetime',
         ];
     }
 
@@ -84,6 +119,98 @@ class Student extends Model
             $this->last_name,
             (string) ($this->student_code ?? '')
         );
+    }
+
+    protected function yearLevelCode(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::code($this->year_level));
+    }
+
+    protected function yearLevelName(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::name($this->year_level));
+    }
+
+    protected function yearLevelKhmer(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::khmer($this->year_level));
+    }
+
+    protected function yearLevelLabel(): Attribute
+    {
+        return Attribute::get(fn () => YearLevel::label($this->year_level));
+    }
+
+    public function resolveAcademicYearName(): ?string
+    {
+        if ($this->relationLoaded('classRoom') && $this->classRoom) {
+            if ($this->classRoom->relationLoaded('academicYear')) {
+                return $this->classRoom->academicYear?->name;
+            }
+
+            return $this->classRoom->academicYear()->value('name');
+        }
+
+        if ($this->class_id) {
+            return $this->classRoom()->with('academicYear:id,name')->first()?->academicYear?->name;
+        }
+
+        if ($this->relationLoaded('courseEnrollments')) {
+            $latest = $this->courseEnrollments->sortByDesc('semester_id')->first();
+
+            return $latest?->semester?->academicYear?->name;
+        }
+
+        return $this->courseEnrollments()
+            ->with('semester.academicYear:id,name')
+            ->orderByDesc('semester_id')
+            ->first()?->semester?->academicYear?->name;
+    }
+
+    public function resolveSemesterName(): ?string
+    {
+        if ($this->relationLoaded('courseEnrollments')) {
+            $active = $this->courseEnrollments
+                ->where('status', 'enrolled')
+                ->sortByDesc('semester_id')
+                ->first() ?? $this->courseEnrollments->sortByDesc('semester_id')->first();
+
+            return $active?->semester?->name;
+        }
+
+        return $this->courseEnrollments()
+            ->with('semester:id,name')
+            ->where('status', 'enrolled')
+            ->orderByDesc('semester_id')
+            ->first()?->semester?->name
+            ?? $this->courseEnrollments()->with('semester:id,name')->orderByDesc('semester_id')->first()?->semester?->name;
+    }
+
+    protected function academicYear(): Attribute
+    {
+        return Attribute::get(fn () => $this->attributes['academic_year'] ?? $this->resolveAcademicYearName());
+    }
+
+    protected function semester(): Attribute
+    {
+        return Attribute::get(fn () => $this->attributes['semester'] ?? $this->resolveSemesterName());
+    }
+
+    public function scopeForYearLevel(Builder $query, mixed $yearLevel): Builder
+    {
+        $variants = YearLevel::dbVariants($yearLevel);
+        if ($variants === []) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        return $query->whereIn('year_level', $variants);
+    }
+
+    public function scopeMissingYearLevel(Builder $query): Builder
+    {
+        return $query->where(function (Builder $q) {
+            $q->whereNull('year_level')->orWhere('year_level', '');
+        });
     }
 
     protected function studentId(): Attribute
@@ -138,7 +265,9 @@ class Student extends Model
             Course::class,
             'course_enrollments'
         )->withPivot([
+            'course_offering_id',
             'semester_id',
+            'year_level',
             'enrollment_date',
             'status',
             'final_score',
@@ -214,5 +343,25 @@ class Student extends Model
     public function notes(): HasMany
     {
         return $this->hasMany(StudentNote::class);
+    }
+
+    public function currentAcademicYear(): BelongsTo
+    {
+        return $this->belongsTo(AcademicYear::class, 'current_academic_year_id');
+    }
+
+    public function currentSemester(): BelongsTo
+    {
+        return $this->belongsTo(Semester::class, 'current_semester_id');
+    }
+
+    public function progressionHistories(): HasMany
+    {
+        return $this->hasMany(StudentProgressionHistory::class, 'student_id');
+    }
+
+    public function retakes(): HasMany
+    {
+        return $this->hasMany(StudentCourseRetake::class, 'student_id');
     }
 }

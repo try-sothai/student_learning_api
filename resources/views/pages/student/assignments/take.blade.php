@@ -20,7 +20,13 @@
         <div class="row g-3 small">
             <div class="col-sm-6"><span class="text-muted">Available from</span><div class="fw-semibold">{{ $assignment->starts_at?->format('M d, Y H:i') ?? 'Now' }}</div></div>
             <div class="col-sm-6"><span class="text-muted">Due</span><div class="fw-semibold">{{ $assignment->ends_at?->format('M d, Y H:i') ?? $assignment->due_date?->format('M d, Y') ?? 'No deadline' }}</div></div>
-            <div class="col-sm-6"><span class="text-muted">Attempts</span><div class="fw-semibold">{{ $attempts->count() }} of {{ $assignment->allow_retakes ? $assignment->max_attempts : 1 }} used</div></div>
+            @if(!empty($access['extended_deadline']))
+                <div class="col-sm-6"><span class="text-muted">Extended deadline</span><div class="fw-semibold text-primary">{{ \Carbon\Carbon::parse($access['extended_deadline'])->format('M d, Y H:i') }}</div></div>
+            @endif
+            @if(!empty($access['reopen_status']))
+                <div class="col-sm-6"><span class="text-muted">Status</span><div class="fw-semibold">{{ $access['reopen_status'] }}</div></div>
+            @endif
+            <div class="col-sm-6"><span class="text-muted">Attempts</span><div class="fw-semibold">{{ $access['used_attempts'] ?? $attempts->count() }} of {{ $access['effective_attempt_limit'] ?? ($assignment->allow_retakes ? $assignment->max_attempts : 1) }} used</div></div>
             <div class="col-sm-6"><span class="text-muted">Assignment type</span><div class="fw-semibold">{{ $assignment->assignment_type === 'true_false' ? 'True / False questions' : 'File upload' }}</div></div>
         </div>
     </div>

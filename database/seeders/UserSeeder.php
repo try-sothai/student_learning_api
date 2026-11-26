@@ -88,7 +88,7 @@ class UserSeeder extends Seeder
                     'gender' => $s['gender'],
                     'nationality' => 'Cambodian',
                     'major' => $s['major'],
-                    'year_level' => 'Year ' . $s['level'],
+                    'year_level' => (string) $s['level'],
                     'enrollment_date' => (2026 - $s['level'] + 1) . '-09-01',
                     'status' => 'enrolled',
                     'deleted_at' => null,

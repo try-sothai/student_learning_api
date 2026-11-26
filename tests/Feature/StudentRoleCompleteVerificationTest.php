@@ -221,10 +221,14 @@ class StudentRoleCompleteVerificationTest extends TestCase
             'answer' => 'Stack',
         ]);
 
-        // Complete attempt without passing score (like Android TakeQuizActivity)
-        $res = $this->actingAs($u1)->putJson('/api/quiz-attempts/' . $attempt->id, [
+        // Student cannot bypass role authorization via admin-only PUT /api/quiz-attempts/{id}
+        $forbiddenRes = $this->actingAs($u1)->putJson('/api/quiz-attempts/' . $attempt->id, [
             'status' => 'completed',
         ]);
+        $forbiddenRes->assertStatus(403);
+
+        // Complete attempt via student quiz submission endpoint (server-side auto-grading)
+        $res = $this->actingAs($u1)->postJson('/api/student/quiz-attempts/' . $attempt->id . '/submit');
 
         $res->assertOk();
         $this->assertEquals(10.0, (float) $res->json('data.score'));

@@ -16,6 +16,15 @@ class QuizAnswer extends Model
         'answer',
         'is_correct',
         'marks_obtained',
+        'grading_status',
+        'teacher_feedback',
+        'graded_by',
+        'graded_at',
+        'question_snapshot',
+    ];
+
+    protected $attributes = [
+        'grading_status' => 'pending_grading',
     ];
 
     protected function casts(): array
@@ -23,6 +32,8 @@ class QuizAnswer extends Model
         return [
             'is_correct' => 'boolean',
             'marks_obtained' => 'float',
+            'graded_at' => 'datetime',
+            'question_snapshot' => 'array',
         ];
     }
 
@@ -33,6 +44,11 @@ class QuizAnswer extends Model
 
     public function question(): BelongsTo
     {
-        return $this->belongsTo(QuizQuestion::class, 'question_id');
+        return $this->belongsTo(QuizQuestion::class, 'question_id')->withTrashed();
+    }
+
+    public function grader(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'graded_by');
     }
 }

@@ -10,7 +10,7 @@ class GradeController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Grade::with(['student.user', 'course', 'semester']);
+        $query = Grade::with(['student.user', 'student.classRoom.academicYear', 'course', 'semester.academicYear']);
 
         $user = $request->user();
         if ($user && $user->role === 'student') {
@@ -53,6 +53,16 @@ class GradeController extends Controller
             $query->where('semester_id', $request->semester_id);
         }
 
+        if ($request->filled('academic_year_id')) {
+            $ayId = (int) $request->academic_year_id;
+            $query->whereHas('semester', fn ($q) => $q->where('academic_year_id', $ayId));
+        }
+
+        if ($request->filled('year_level') && strtolower((string) $request->query('year_level')) !== 'all') {
+            $yl = (string) $request->query('year_level');
+            $query->whereHas('student', fn ($sq) => strtolower($yl) === 'missing' ? $sq->missingYearLevel() : $sq->forYearLevel($yl));
+        }
+
         $grades = $query->latest()->get();
 
         return response()->json([
@@ -81,7 +91,7 @@ class GradeController extends Controller
             'total_score' => 'nullable|numeric|min:0|max:100',
             'letter_grade' => 'nullable|string|max:5',
             'grade_point' => 'nullable|numeric|min:0|max:4.0',
-            'status' => 'nullable|string|in:draft,submitted,finalized',
+            'status' => 'nullable|string|in:draft,submitted,provisional,finalized,official,published',
         ]);
 
         if ($user->role === 'teacher') {
@@ -158,7 +168,7 @@ class GradeController extends Controller
             'total_score' => 'nullable|numeric|min:0|max:100',
             'letter_grade' => 'nullable|string|max:5',
             'grade_point' => 'nullable|numeric|min:0|max:4.0',
-            'status' => 'nullable|string|in:draft,submitted,finalized',
+            'status' => 'nullable|string|in:draft,submitted,provisional,finalized,official,published',
         ]);
 
         $grade->update($validated);

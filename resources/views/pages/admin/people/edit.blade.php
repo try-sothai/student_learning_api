@@ -20,9 +20,21 @@
                     <div class="col-md-6">
                         <label for="{{ $field['name'] }}" class="form-label">{{ $field['label'] }}</label>
                         @if($field['type'] === 'select')
+                            @php
+                                $options = $field['options'] ?? [];
+                                $isAssoc = !empty($options) && !array_is_list($options);
+                                $currentValue = (string) old($field['name'], $field['value'] ?? '');
+                            @endphp
                             <select id="{{ $field['name'] }}" name="{{ $field['name'] }}" class="form-select" @required($field['required'])>
-                                @foreach($field['options'] as $option)
-                                    <option value="{{ $option }}" @selected(old($field['name'], $field['value']) === $option)>{{ ucfirst($option) }}</option>
+                                @if(! $field['required'])
+                                    <option value="">{{ __('— Not set —') }}</option>
+                                @endif
+                                @foreach($options as $optionKey => $optionLabel)
+                                    @php
+                                        $optionValue = $isAssoc ? (string) $optionKey : (string) $optionLabel;
+                                        $displayLabel = $isAssoc ? (string) $optionLabel : ucfirst((string) $optionLabel);
+                                    @endphp
+                                    <option value="{{ $optionValue }}" @selected($currentValue === $optionValue)>{{ $displayLabel }}</option>
                                 @endforeach
                             </select>
                         @elseif($field['type'] === 'textarea')

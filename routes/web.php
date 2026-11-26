@@ -5,18 +5,26 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Barryvdh\DomPDF\Facade\Pdf;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\StudentAssignmentController;
 use App\Http\Controllers\StudentPortalController;
+use App\Models\AcademicYear;
 use App\Models\Attendance;
 use App\Models\Assignment;
 use App\Models\AssignmentAttempt;
+use App\Models\ClassRoom;
 use App\Models\Course;
+use App\Models\Department;
+use App\Models\Program;
 use App\Models\Student;
 use App\Models\Teacher;
 use App\Models\User;
+use App\Rules\ValidYearLevel;
+use App\Services\AcademicProfileResolver;
+use App\Support\YearLevel;
 
 Route::view('/', 'pages.auth.login')->name('home');
 
@@ -56,7 +64,9 @@ Route::prefix('student')
         Route::get('/dashboard', [StudentPortalController::class, 'dashboard'])->name('student.dashboard');
 
         Route::get('/profile', function () {
-            $student = Student::where('user_id', Auth::id())->first();
+            $student = Student::with(['user', 'department', 'classRoom.academicYear', 'program', 'courseEnrollments.semester.academicYear'])
+                ->where('user_id', Auth::id())
+                ->first();
 
             return view('pages.student.profile.index', [
                 'student' => $student,
@@ -64,7 +74,9 @@ Route::prefix('student')
         })->name('student.profile');
 
         Route::get('/profile/edit', function () {
-            $student = Student::where('user_id', Auth::id())->first();
+            $student = Student::with(['user', 'department', 'classRoom.academicYear', 'program', 'courseEnrollments.semester.academicYear'])
+                ->where('user_id', Auth::id())
+                ->first();
 
             return view('pages.student.profile.edit', [
                 'student' => $student,
@@ -97,10 +109,32 @@ Route::prefix('student')
                 ])
                     ->whereIn('course_id', $enrolledCourseIds)
                     ->where('assignment_type', 'true_false')
-                    ->where('status', 'published')
+                    ->where(function ($statusQuery) use ($student) {
+                        $statusQuery->where('status', 'published')
+                            ->orWhere(function ($closed) use ($student) {
+                                $closed->where('status', 'closed')
+                                    ->where(function ($reopened) use ($student) {
+                                        $reopened->where('reopened_until', '>', now())
+                                            ->orWhere('allow_late_submission', true)
+                                            ->orWhereExists(function ($ov) use ($student) {
+                                                $ov->select(DB::raw(1))
+                                                    ->from('assessment_student_overrides')
+                                                    ->whereColumn('assessment_student_overrides.assessment_id', 'assignments.id')
+                                                    ->whereIn('assessment_student_overrides.assessment_type', ['assignment', 'homework'])
+                                                    ->where('assessment_student_overrides.student_id', $student->id)
+                                                    ->where('assessment_student_overrides.is_active', true)
+                                                    ->where('assessment_student_overrides.allow_submission', true);
+                                            });
+                                    });
+                            });
+                    })
                     ->orderBy('ends_at')
                     ->get()
                 : collect();
+            $reopenService = app(\App\Services\AssessmentReopenService::class);
+            $accessMap = $student
+                ? $quizzes->mapWithKeys(fn (Assignment $quiz) => [$quiz->id => $reopenService->evaluateAccess($quiz, $student)])->all()
+                : [];
             $quizAttempts = $quizzes->flatMap(fn (Assignment $quiz) => $quiz->attempts);
             $gradedQuizAttempts = $quizAttempts->filter(fn (AssignmentAttempt $attempt) => $attempt->score !== null);
             $weekStart = now()->startOfWeek();
@@ -113,6 +147,7 @@ Route::prefix('student')
 
             return view('pages.student.quizzes.index', [
                 'quizzes' => $quizzes,
+                'accessMap' => $accessMap,
                 'availableCount' => $quizzes->count(),
                 'completedCount' => $quizzes->filter(fn (Assignment $quiz) => $quiz->attempts->isNotEmpty())->count(),
                 'averageScore' => $gradedQuizAttempts->avg('score'),
@@ -176,15 +211,21 @@ Route::prefix('student')
         Route::get('/analytics', [StudentPortalController::class, 'analytics'])->name('student.analytics');
 
         Route::get('/courses', function () {
-            $student = Student::where('user_id', Auth::id())->first();
+            $student = Student::with(['department', 'classRoom.academicYear', 'courseEnrollments.semester.academicYear'])
+                ->where('user_id', Auth::id())
+                ->first();
             $courses = $student
-                ? $student->courses()->with('teacher.user')->wherePivot('status', 'enrolled')->orderBy('code')->get()
+                ? $student->courses()->with(['teacher.user', 'departmentRelation'])->wherePivot('status', 'enrolled')->orderBy('code')->get()
                 : collect();
             $assignments = $student
                 ? Assignment::with('course')->whereIn('course_id', $courses->pluck('id'))->where('status', 'published')->orderBy('due_date')->get()
                 : collect();
 
-            return view('pages.student.courses.index', compact('courses', 'assignments'));
+            return view('pages.student.courses.index', [
+                'studentProfile' => $student,
+                'courses' => $courses,
+                'assignments' => $assignments,
+            ]);
         })->name('student.courses');
 
         Route::get('/calendar', [StudentPortalController::class, 'calendar'])->name('student.calendar');
@@ -244,6 +285,7 @@ Route::prefix('teacher')
                 return [
                     'name' => $course->name,
                     'code' => $course->code,
+                    'year_level_code' => $course->year_level_code ?? 'Cross-year',
                     'enrolled' => (int) $enrollmentCounts->get($course->id, 0),
                     'attendance_rate' => $markedCount > 0 ? round($attendedCount / $markedCount * 100) . '%' : 'No records',
                     'attended' => $attendedCount,
@@ -312,9 +354,22 @@ Route::prefix('teacher')
             $teacher = Teacher::where('user_id', Auth::id())->first();
             $teacherCourseIds = $teacher ? Course::where('teacher_id', $teacher->id)->pluck('id') : collect();
             $search = trim((string) $request->query('search', ''));
+            $yearLevelFilter = trim((string) $request->query('year_level', ''));
             $studentQuery = Student::query()
-                ->with(['user', 'courses' => fn ($query) => $query->whereIn('courses.id', $teacherCourseIds)])
+                ->with([
+                    'user',
+                    'department',
+                    'classRoom.academicYear',
+                    'courseEnrollments.semester.academicYear',
+                    'courses' => fn ($query) => $query->whereIn('courses.id', $teacherCourseIds),
+                ])
                 ->whereHas('courses', fn ($query) => $query->whereIn('courses.id', $teacherCourseIds));
+
+            if ($request->boolean('missing_year_level') || strtolower($yearLevelFilter) === 'missing') {
+                $studentQuery->missingYearLevel();
+            } elseif ($yearLevelFilter !== '' && strtolower($yearLevelFilter) !== 'all') {
+                $studentQuery->forYearLevel($yearLevelFilter);
+            }
 
             if ($search !== '') {
                 $searchTerm = '%' . $search . '%';
@@ -322,7 +377,7 @@ Route::prefix('teacher')
                     $query->where('student_code', 'like', $searchTerm)
                         ->orWhere('first_name', 'like', $searchTerm)
                         ->orWhere('last_name', 'like', $searchTerm)
-                        ->orWhere('department', 'like', $searchTerm)
+                        ->orWhereHas('department', fn ($deptQuery) => $deptQuery->where('name', 'like', $searchTerm))
                         ->orWhereHas('user', fn ($userQuery) => $userQuery->where('name', 'like', $searchTerm))
                         ->orWhereHas('courses', fn ($courseQuery) => $courseQuery
                             ->whereIn('courses.id', $teacherCourseIds)
@@ -343,6 +398,9 @@ Route::prefix('teacher')
                     $student->courses->pluck('code')->join(', '),
                     ucfirst($student->status),
                     $student->id,
+                    'year_level_code' => $student->year_level_code,
+                    'academic_year' => $student->resolveAcademicYearName(),
+                    'class_code' => $student->classRoom?->code ?? $student->classRoom?->name,
                 ]);
 
             return view('pages.teacher.students.index', [
@@ -354,12 +412,17 @@ Route::prefix('teacher')
                 'managementRows' => $managementRows,
                 'managementCount' => $managementRows->total(),
                 'search' => $search,
+                'yearLevelFilter' => $yearLevelFilter,
+                'yearLevelOptions' => YearLevel::options(),
             ]);
         })->name('teacher.students');
         Route::get('/students/{student}', function (Student $student) {
             $teacher = Teacher::where('user_id', Auth::id())->firstOrFail();
             $student = Student::with([
                 'user',
+                'department',
+                'classRoom.academicYear',
+                'courseEnrollments.semester.academicYear',
                 'courses' => fn ($query) => $query
                     ->where('courses.teacher_id', $teacher->id)
                     ->where('course_enrollments.status', 'enrolled'),
@@ -698,8 +761,24 @@ Route::prefix('teacher')
                 'managementCount' => $quizzes->total(),
                 'courses' => $teacher ? Course::where('teacher_id', $teacher->id)->orderBy('name')->get(['id', 'name', 'code']) : collect(),
                 'isQuizPage' => true,
+                'modernQuizzes' => app(\App\Http\Controllers\TeacherQuizReopenWebController::class)->listModernQuizzes($teacher),
             ]);
         })->name('teacher.quizzes');
+        Route::get('/quizzes/{quiz}/manage', [\App\Http\Controllers\TeacherQuizReopenWebController::class, 'manage'])
+            ->whereNumber('quiz')
+            ->name('teacher.quizzes.manage');
+        Route::post('/quizzes/{quiz}/reopen', [\App\Http\Controllers\TeacherQuizReopenWebController::class, 'reopen'])
+            ->whereNumber('quiz')
+            ->name('teacher.quizzes.reopen');
+        Route::post('/quizzes/{quiz}/extend-deadline', [\App\Http\Controllers\TeacherQuizReopenWebController::class, 'extendDeadline'])
+            ->whereNumber('quiz')
+            ->name('teacher.quizzes.extend-deadline');
+        Route::post('/quizzes/{quiz}/grant-attempts', [\App\Http\Controllers\TeacherQuizReopenWebController::class, 'grantAttempts'])
+            ->whereNumber('quiz')
+            ->name('teacher.quizzes.grant-attempts');
+        Route::post('/quizzes/{quiz}/revoke', [\App\Http\Controllers\TeacherQuizReopenWebController::class, 'revoke'])
+            ->whereNumber('quiz')
+            ->name('teacher.quizzes.revoke');
         Route::get('/grades', function () {
             $teacher = Teacher::where('user_id', Auth::id())->first();
             $courseIds = $teacher ? Course::where('teacher_id', $teacher->id)->select('id') : collect();
@@ -765,7 +844,7 @@ Route::prefix('teacher')
         })->name('teacher.courses');
         Route::get('/courses/{course}', function (Course $course) {
             $teacher = Teacher::where('user_id', Auth::id())->firstOrFail();
-            $course = Course::with(['teacher.user', 'assignments'])
+            $course = Course::with(['departmentRelation', 'teacher.user', 'assignments'])
                 ->where('teacher_id', $teacher->id)
                 ->findOrFail($course->id);
 
@@ -879,9 +958,18 @@ Route::prefix('teacher')
 
             return response()->streamDownload(function () use ($reportRows) {
                 $output = fopen('php://output', 'w');
-                fputcsv($output, ['Class', 'Code', 'Enrolled students', 'Attendance rate', 'Present or late', 'Absent', 'Assignments']);
+                fputcsv($output, ['Class', 'Code', 'Enrolled students', 'Attendance rate', 'Present or late', 'Absent', 'Assignments', 'Year level']);
                 foreach ($reportRows as $row) {
-                    fputcsv($output, array_values($row));
+                    fputcsv($output, [
+                        $row['name'],
+                        $row['code'],
+                        $row['enrolled'],
+                        $row['attendance_rate'],
+                        $row['attended'],
+                        $row['absent'],
+                        $row['assignments'],
+                        $row['year_level_code'],
+                    ]);
                 }
                 fclose($output);
             }, 'teacher-class-report-' . now()->format('Y-m-d') . '.csv', ['Content-Type' => 'text/csv']);
@@ -929,14 +1017,67 @@ Route::prefix('admin')
             ]);
         })->name('admin.dashboard');
 
-        Route::get('/students', function () {
-            $managementRows = Student::with('user', 'department')->latest()->paginate(10)
+        Route::get('/students', function (Request $request) {
+            $query = Student::with([
+                'user',
+                'department',
+                'classRoom.academicYear',
+                'courseEnrollments.semester.academicYear',
+            ]);
+
+            $search = trim((string) $request->query('search', ''));
+            if ($search !== '') {
+                $like = '%' . $search . '%';
+                $query->where(function ($q) use ($like) {
+                    $q->where('student_code', 'like', $like)
+                        ->orWhere('first_name', 'like', $like)
+                        ->orWhere('last_name', 'like', $like)
+                        ->orWhere('major', 'like', $like)
+                        ->orWhereHas('user', fn ($uq) => $uq->where('name', 'like', $like)->orWhere('email', 'like', $like))
+                        ->orWhereHas('department', fn ($dq) => $dq->where('name', 'like', $like))
+                        ->orWhereHas('classRoom', fn ($cq) => $cq->where('code', 'like', $like)->orWhere('name', 'like', $like));
+                });
+            }
+
+            $yearLevelFilter = trim((string) $request->query('year_level', ''));
+            if ($request->boolean('missing_year_level') || strtolower($yearLevelFilter) === 'missing') {
+                $query->missingYearLevel();
+            } elseif ($yearLevelFilter !== '' && strtolower($yearLevelFilter) !== 'all') {
+                $query->forYearLevel($yearLevelFilter);
+            }
+
+            if ($request->filled('academic_year_id')) {
+                $ayId = (int) $request->query('academic_year_id');
+                $query->where(function ($q) use ($ayId) {
+                    $q->whereHas('classRoom', fn ($cq) => $cq->where('academic_year_id', $ayId))
+                        ->orWhereHas('courseEnrollments.courseOffering', fn ($oq) => $oq->where('academic_year_id', $ayId));
+                });
+            }
+
+            if ($request->filled('department_id') || $request->filled('faculty_id')) {
+                $query->where('department_id', (int) ($request->query('department_id') ?? $request->query('faculty_id')));
+            }
+
+            if ($request->filled('class_id')) {
+                $query->where('class_id', (int) $request->query('class_id'));
+            }
+
+            $statusFilter = trim((string) $request->query('status', ''));
+            if ($statusFilter !== '' && strtolower($statusFilter) !== 'all') {
+                $query->where('status', $statusFilter);
+            }
+
+            $managementRows = $query->latest()->paginate(10)->withQueryString()
                 ->through(fn (Student $student) => [
                     $student->user?->name ?? trim($student->first_name . ' ' . $student->last_name),
                     $student->student_id,
                     $student->department?->name ?? 'Not set',
                     ucfirst($student->status),
                     $student->id,
+                    'year_level_code' => $student->year_level_code,
+                    'year_level_label' => $student->year_level_label,
+                    'academic_year' => $student->resolveAcademicYearName(),
+                    'class_code' => $student->classRoom?->code ?? $student->classRoom?->name,
                 ]);
             $studentCount = $managementRows->total();
 
@@ -944,14 +1085,25 @@ Route::prefix('admin')
                 'managementStats' => [
                     ['Total Students', number_format($studentCount), 'collection'],
                     ['Needs attention', number_format(Student::whereIn('status', ['suspended', 'inactive'])->count()), 'clock'],
-                    ['Attendance', 'N/A', 'graph-up-arrow'],
+                    ['Missing Year Level', number_format(Student::missingYearLevel()->count()), 'exclamation-circle'],
                 ],
                 'managementRows' => $managementRows,
                 'managementCount' => $studentCount,
+                'academicYears' => AcademicYear::orderByDesc('name')->get(['id', 'name', 'status']),
+                'departments' => Department::orderBy('name')->get(['id', 'name']),
+                'classes' => ClassRoom::with('academicYear:id,name')->orderBy('year_level')->orderBy('code')->get(['id', 'code', 'name', 'year_level', 'academic_year_id']),
+                'yearLevelOptions' => YearLevel::options(),
             ]);
         })->name('admin.students');
 
-        Route::post('/students', function (Request $request) {
+        Route::post('/students', function (Request $request, AcademicProfileResolver $resolver) {
+            if (! $request->filled('department') && $request->filled('faculty')) {
+                $request->merge(['department' => $request->input('faculty')]);
+            }
+            if (! $request->filled('program_id') && $request->filled('major_id')) {
+                $request->merge(['program_id' => $request->input('major_id')]);
+            }
+
             $validated = $request->validate([
                 'student_id' => 'required|string|max:50|unique:students,student_code',
                 'first_name' => 'required|string|max:100',
@@ -961,14 +1113,20 @@ Route::prefix('admin')
                 'date_of_birth' => 'required|date',
                 'gender' => 'required|in:Male,Female',
                 'department' => 'nullable|string|max:255',
+                'program_id' => 'nullable|integer|exists:programs,id',
                 'major' => 'nullable|string|max:255',
                 'academic_year' => 'nullable|string|max:20',
-                'year_level' => 'nullable|string|max:255',
+                'year_level' => ['nullable', new ValidYearLevel()],
+                'class_id' => 'nullable|integer|exists:classes,id',
                 'semester' => 'nullable|string|max:50',
                 'status' => 'required|in:enrolled,graduated,suspended,inactive',
             ]);
 
-            DB::transaction(function () use ($validated) {
+            $yearLevelStorage = array_key_exists('year_level', $validated) && $validated['year_level'] !== null && $validated['year_level'] !== ''
+                ? YearLevel::storageValue($validated['year_level'])
+                : null;
+
+            DB::transaction(function () use ($validated, $resolver, $yearLevelStorage) {
                 $user = User::create([
                     'name' => trim($validated['first_name'] . ' ' . $validated['last_name']),
                     'email' => $validated['email'],
@@ -976,7 +1134,38 @@ Route::prefix('admin')
                     'role' => 'student',
                 ]);
 
-                Student::create($validated + ['user_id' => $user->id]);
+                $deptId = filled($validated['department'] ?? null)
+                    ? $resolver->resolveDepartmentId(null, $validated['department'])
+                    : null;
+
+                $programId = $validated['program_id'] ?? null;
+                $majorName = $validated['major'] ?? null;
+                if ($programId) {
+                    $majorName = $majorName ?: Program::where('id', $programId)->value('name');
+                } elseif (filled($majorName) && $deptId) {
+                    $programId = Program::where('department_id', $deptId)
+                        ->where(fn ($q) => $q->where('name', $majorName)->orWhere('code', $majorName))
+                        ->value('id');
+                }
+
+                $classId = !empty($validated['class_id'])
+                    ? (int) $validated['class_id']
+                    : $resolver->findClassId($deptId, $validated['academic_year'] ?? null, $yearLevelStorage);
+
+                Student::create([
+                    'user_id' => $user->id,
+                    'student_code' => $validated['student_id'],
+                    'first_name' => $validated['first_name'],
+                    'last_name' => $validated['last_name'],
+                    'date_of_birth' => $validated['date_of_birth'],
+                    'gender' => $validated['gender'],
+                    'department_id' => $deptId,
+                    'program_id' => $programId,
+                    'class_id' => $classId,
+                    'major' => $majorName,
+                    'year_level' => $yearLevelStorage,
+                    'status' => $validated['status'],
+                ]);
             });
 
             return redirect()->route('admin.students')->with('status', 'Student and login account created successfully.');
@@ -1052,14 +1241,49 @@ Route::prefix('admin')
         Route::put('/teachers/{teacher}', [\App\Http\Controllers\AdminPeopleController::class, 'updateTeacher'])->name('admin.teachers.update');
         Route::delete('/teachers/{teacher}', [\App\Http\Controllers\AdminPeopleController::class, 'destroyTeacher'])->name('admin.teachers.destroy');
 
-        Route::get('/courses', function () {
-            $managementRows = Course::with('department')->latest()->paginate(10)
+        Route::get('/courses', function (Request $request) {
+            $query = Course::with(['department', 'offerings.academicYear']);
+
+            $search = trim((string) $request->query('search', ''));
+            if ($search !== '') {
+                $like = '%' . $search . '%';
+                $query->where(function ($q) use ($like) {
+                    $q->where('name', 'like', $like)
+                        ->orWhere('code', 'like', $like)
+                        ->orWhere('course_code', 'like', $like)
+                        ->orWhereHas('department', fn ($dq) => $dq->where('name', 'like', $like));
+                });
+            }
+
+            $yearLevelFilter = trim((string) $request->query('year_level', ''));
+            if ($yearLevelFilter !== '' && strtolower($yearLevelFilter) !== 'all') {
+                $query->forYearLevel($yearLevelFilter);
+            }
+
+            if ($request->filled('academic_year_id')) {
+                $ayId = (int) $request->query('academic_year_id');
+                $ayName = AcademicYear::where('id', $ayId)->value('name');
+                $query->where(function ($q) use ($ayId, $ayName) {
+                    $q->whereHas('offerings', fn ($oq) => $oq->where('academic_year_id', $ayId));
+                    if ($ayName) {
+                        $q->orWhere('academic_year', $ayName);
+                    }
+                });
+            }
+
+            if ($request->filled('department_id') || $request->filled('faculty_id')) {
+                $query->where('department_id', (int) ($request->query('department_id') ?? $request->query('faculty_id')));
+            }
+
+            $managementRows = $query->latest()->paginate(10)->withQueryString()
                 ->through(fn (Course $course) => [
                     $course->name,
                     $course->code,
-                    trim(($course->department?->name ?? 'Department not set') . ($course->credits ? ' · ' . $course->credits . ' credits' : '')),
+                    trim(($course->department?->name ?? 'Faculty not set') . ($course->credits ? ' · ' . $course->credits . ' credits' : '')),
                     ucfirst($course->status),
                     $course->id,
+                    'year_level_code' => $course->year_level_code,
+                    'academic_year' => $course->academic_year ?: $course->offerings->first()?->academicYear?->name,
                 ]);
             $courseCount = $managementRows->total();
 
@@ -1072,6 +1296,9 @@ Route::prefix('admin')
                 'managementRows' => $managementRows,
                 'managementCount' => $courseCount,
                 'teachers' => Teacher::with('user')->orderBy('first_name')->get(),
+                'academicYears' => AcademicYear::orderByDesc('name')->get(['id', 'name', 'status']),
+                'departments' => Department::orderBy('name')->get(['id', 'name']),
+                'yearLevelOptions' => YearLevel::options(),
             ]);
         })->name('admin.courses');
 
@@ -1093,41 +1320,54 @@ Route::prefix('admin')
                 'start_time' => 'nullable|date_format:H:i',
                 'end_time' => 'nullable|date_format:H:i',
                 'academic_year' => 'nullable|string|max:20',
+                'year_level' => ['nullable', new ValidYearLevel()],
                 'semester' => 'nullable|string|max:50',
                 'room' => 'nullable|string|max:100',
             ]);
 
             $course = Course::findOrFail($validated['course_id']);
+            $yearLevelInt = array_key_exists('year_level', $validated)
+                ? (filled($validated['year_level']) ? YearLevel::parse($validated['year_level']) : null)
+                : YearLevel::parse($course->year_level);
+
             $course->update([
                 'teacher_id' => $validated['teacher_id'] ?? null,
                 'day_of_week' => $validated['day_of_week'] ?? null,
                 'start_time' => $validated['start_time'] ?? null,
                 'end_time' => $validated['end_time'] ?? null,
                 'academic_year' => $validated['academic_year'] ?? null,
+                'year_level' => $yearLevelInt,
                 'semester' => $validated['semester'] ?? null,
                 'room' => $validated['room'] ?? null,
             ]);
 
+            $classPayload = [
+                'teacher_id' => $course->teacher_id,
+                'name' => $course->name,
+                'code' => $course->code,
+                'day_of_week' => $course->day_of_week,
+                'start_time' => $course->start_time,
+                'end_time' => $course->end_time,
+                'room' => $course->room,
+                'status' => $course->status,
+                'updated_at' => now(),
+            ];
+            if ($yearLevelInt !== null) {
+                $classPayload['year_level'] = $yearLevelInt;
+            }
+
             DB::table('classes')->updateOrInsert(
                 ['course_id' => $course->id],
-                [
-                    'teacher_id' => $course->teacher_id,
-                    'name' => $course->name,
-                    'code' => $course->code,
-                    'day_of_week' => $course->day_of_week,
-                    'start_time' => $course->start_time,
-                    'end_time' => $course->end_time,
-                    'room' => $course->room,
-                    'status' => $course->status,
-                    'updated_at' => now(),
-                ]
+                $classPayload
             );
 
-            if (!empty($validated['student_ids'])) {
+            if (! empty($validated['student_ids'])) {
+                $studentLevels = Student::whereIn('id', $validated['student_ids'])->pluck('year_level', 'id');
                 foreach ($validated['student_ids'] as $studentId) {
                     $course->students()->syncWithoutDetaching([
                         $studentId => [
                             'status' => 'enrolled',
+                            'year_level' => $yearLevelInt ?? YearLevel::parse($studentLevels->get($studentId)),
                         ],
                     ]);
                 }
@@ -1147,6 +1387,7 @@ Route::prefix('admin')
                 'student_ids' => 'nullable|array',
                 'student_ids.*' => 'integer|exists:students,id',
                 'academic_year' => 'nullable|string|max:20',
+                'year_level' => ['nullable', new ValidYearLevel()],
                 'semester' => 'nullable|string|max:50',
                 'day_of_week' => 'nullable|string|max:20',
                 'start_time' => 'nullable|date_format:H:i',
@@ -1155,22 +1396,33 @@ Route::prefix('admin')
                 'status' => 'required|in:active,inactive',
             ]);
 
+            if (array_key_exists('year_level', $validated)) {
+                $validated['year_level'] = filled($validated['year_level'])
+                    ? YearLevel::parse($validated['year_level'])
+                    : null;
+            }
+
             $course = Course::create($validated);
+
+            $classPayload = [
+                'teacher_id' => $validated['teacher_id'] ?? null,
+                'name' => $course->name,
+                'code' => $course->code,
+                'day_of_week' => $validated['day_of_week'] ?? null,
+                'start_time' => $validated['start_time'] ?? null,
+                'end_time' => $validated['end_time'] ?? null,
+                'room' => $validated['room'] ?? null,
+                'status' => $course->status,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ];
+            if (! empty($validated['year_level'])) {
+                $classPayload['year_level'] = (int) $validated['year_level'];
+            }
 
             DB::table('classes')->updateOrInsert(
                 ['course_id' => $course->id],
-                [
-                    'teacher_id' => $validated['teacher_id'] ?? null,
-                    'name' => $course->name,
-                    'code' => $course->code,
-                    'day_of_week' => $validated['day_of_week'] ?? null,
-                    'start_time' => $validated['start_time'] ?? null,
-                    'end_time' => $validated['end_time'] ?? null,
-                    'room' => $validated['room'] ?? null,
-                    'status' => $course->status,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]
+                $classPayload
             );
 
             if (! empty($validated['teacher_id'])) {
@@ -1178,10 +1430,13 @@ Route::prefix('admin')
             }
 
             if (! empty($validated['student_ids'])) {
+                $studentLevels = Student::whereIn('id', $validated['student_ids'])->pluck('year_level', 'id');
+                $courseYearLevel = YearLevel::parse($course->year_level);
                 foreach ($validated['student_ids'] as $studentId) {
                     $course->students()->syncWithoutDetaching([
                         $studentId => [
                             'status' => 'enrolled',
+                            'year_level' => $courseYearLevel ?? YearLevel::parse($studentLevels->get($studentId)),
                         ],
                     ]);
                 }
@@ -1248,6 +1503,10 @@ Route::prefix('admin')
                 ['Courses', Course::count()],
                 ['Assignments', Assignment::count()],
             ];
+            foreach (YearLevel::options() as $yl) {
+                $reportRows[] = ['Students (' . $yl['code'] . ' — ' . $yl['name'] . ')', Student::forYearLevel($yl['number'])->count()];
+            }
+            $reportRows[] = ['Students (Unassigned Year Level)', Student::missingYearLevel()->count()];
 
             return response()->streamDownload(function () use ($reportRows) {
                 $output = fopen('php://output', 'w');
@@ -1266,6 +1525,10 @@ Route::prefix('admin')
                 ['Courses', Course::count()],
                 ['Assignments', Assignment::count()],
             ];
+            foreach (YearLevel::options() as $yl) {
+                $reportRows[] = ['Students (' . $yl['code'] . ' — ' . $yl['name'] . ')', Student::forYearLevel($yl['number'])->count()];
+            }
+            $reportRows[] = ['Students (Unassigned Year Level)', Student::missingYearLevel()->count()];
 
             return Pdf::loadView('pages.admin.reports.pdf', [
                 'reportRows' => $reportRows,
@@ -1273,7 +1536,18 @@ Route::prefix('admin')
             ])->download('slas-report-' . now()->format('Y-m-d') . '.pdf');
         })->name('admin.reports.export-pdf');
 
-        Route::get('/reports', function () {
+        Route::get('/reports', function (Request $request) {
+            $yearLevelRows = collect(YearLevel::options())->map(function (array $yl) {
+                $count = Student::forYearLevel($yl['number'])->count();
+                return [
+                    'Students — ' . $yl['label'],
+                    $yl['code'],
+                    number_format($count) . ' students',
+                    $count > 0 ? 'Active' : 'Empty',
+                    null,
+                ];
+            })->all();
+
             return view('pages.admin.reports.index', [
                 'managementStats' => [
                     ['Students', number_format(Student::count()), 'people'],
@@ -1281,8 +1555,8 @@ Route::prefix('admin')
                     ['Courses', number_format(Course::count()), 'book'],
                     ['Assignments', number_format(Assignment::count()), 'journal-text'],
                 ],
-                'managementRows' => [],
-                'managementCount' => 0,
+                'managementRows' => $yearLevelRows,
+                'managementCount' => count($yearLevelRows),
             ]);
         })->name('admin.reports');
 

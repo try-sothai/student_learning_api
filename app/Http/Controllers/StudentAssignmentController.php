@@ -20,28 +20,36 @@ class StudentAssignmentController extends Controller
     {
         $student = Student::where('user_id', Auth::id())->first();
         $assignments = $student
-            ? Assignment::with([
-                'course',
-                'attempts' => fn ($query) => $query
-                    ->where('student_id', $student->id)
-                    ->orderByDesc('attempt_number'),
-            ])
-                ->where('status', 'published')
-                ->whereHas('course.students', fn ($query) => $query
-                    ->where('students.id', $student->id)
-                    ->where('course_enrollments.status', 'enrolled'))
+            ? $this->scopeVisibleToStudent(
+                Assignment::with([
+                    'course',
+                    'attempts' => fn ($query) => $query
+                        ->where('student_id', $student->id)
+                        ->orderByDesc('attempt_number'),
+                ]),
+                $student
+            )
                 ->orderBy('ends_at')
                 ->get()
             : collect();
-        $attemptCount = $assignments->sum(fn (Assignment $assignment) => $assignment->attempts->count());
-        $completedCount = $assignments->filter(fn (Assignment $assignment) => $assignment->attempts->isNotEmpty())->count();
+
+        $reopenService = app(\App\Services\AssessmentReopenService::class);
+        $accessMap = $student
+            ? $assignments->mapWithKeys(fn (Assignment $assignment) => [
+                $assignment->id => $reopenService->evaluateAccess($assignment, $student),
+            ])->all()
+            : [];
+
+        $attemptCount = collect($accessMap)->sum(fn (array $a) => (int) ($a['used_attempts'] ?? 0));
+        $completedCount = collect($accessMap)->filter(fn (array $a) => (int) ($a['used_attempts'] ?? 0) > 0)->count();
 
         return view('pages.student.assignments.list', [
             'assignments' => $assignments,
+            'accessMap' => $accessMap,
             'totalCount' => $assignments->count(),
             'attemptCount' => $attemptCount,
             'completedCount' => $completedCount,
-            'pendingCount' => $assignments->filter(fn (Assignment $assignment) => $assignment->attempts->isEmpty())->count(),
+            'pendingCount' => max(0, $assignments->count() - $completedCount),
         ]);
     }
 
@@ -50,9 +58,13 @@ class StudentAssignmentController extends Controller
         $student = $this->currentStudent();
         $assignment = $this->assignedPublishedAssignment($assignment, $student);
         $attempts = $assignment->attempts()->where('student_id', $student->id)->orderByDesc('attempt_number')->get();
-        $canSubmit = $this->isWithinAvailability($assignment)
-            && $attempts->count() < $this->attemptLimit($assignment);
-        $availabilityMessage = $this->availabilityMessage($assignment, $attempts->count());
+        $access = app(\App\Services\AssessmentReopenService::class)->evaluateAccess($assignment, $student);
+        $canSubmit = (bool) ($access['can_submit'] ?? false);
+        $availabilityMessage = $canSubmit
+            ? (in_array($access['reopen_status'] ?? null, ['Reopened', 'Extended'], true)
+                ? 'Assessment ' . strtolower((string) $access['reopen_status']) . (! empty($access['effective_deadline']) ? ' until ' . \Carbon\Carbon::parse($access['effective_deadline'])->format('M d, Y H:i') : '.')
+                : null)
+            : ($access['blocked_reason'] ?? $this->availabilityMessage($assignment, $attempts->count()));
         $questions = $assignment->assignment_type === 'true_false'
             ? AssignmentQuestion::where('assignment_id', $assignment->id)->orderBy('position')->get(['id', 'prompt', 'position'])
             : collect();
@@ -63,6 +75,7 @@ class StudentAssignmentController extends Controller
             'canSubmit',
             'availabilityMessage',
             'questions',
+            'access',
         ));
     }
 
@@ -70,12 +83,12 @@ class StudentAssignmentController extends Controller
     {
         $student = $this->currentStudent();
         $assignment = $this->assignedPublishedAssignment($assignment, $student);
-        abort_unless($this->isWithinAvailability($assignment), 403);
+        $access = app(\App\Services\AssessmentReopenService::class)->evaluateAccess($assignment, $student);
+        abort_unless((bool) ($access['can_submit'] ?? false), 403, (string) ($access['blocked_reason'] ?? 'Submission is not currently allowed.'));
 
         $attemptNumber = AssignmentAttempt::where('assignment_id', $assignment->id)
             ->where('student_id', $student->id)
             ->count() + 1;
-        abort_if($attemptNumber > $this->attemptLimit($assignment), 403);
 
         $filePath = null;
         $fileName = null;
@@ -151,15 +164,39 @@ class StudentAssignmentController extends Controller
         return Student::where('user_id', Auth::id())->firstOrFail();
     }
 
+    private function scopeVisibleToStudent($query, Student $student)
+    {
+        return $query
+            ->where(function ($statusQuery) use ($student) {
+                $statusQuery->where('status', 'published')
+                    ->orWhere(function ($closed) use ($student) {
+                        $closed->where('status', 'closed')
+                            ->where(function ($reopened) use ($student) {
+                                $reopened->where('reopened_until', '>', now())
+                                    ->orWhere('allow_late_submission', true)
+                                    ->orWhereExists(function ($ov) use ($student) {
+                                        $ov->select(DB::raw(1))
+                                            ->from('assessment_student_overrides')
+                                            ->whereColumn('assessment_student_overrides.assessment_id', 'assignments.id')
+                                            ->whereIn('assessment_student_overrides.assessment_type', ['assignment', 'homework'])
+                                            ->where('assessment_student_overrides.student_id', $student->id)
+                                            ->where('assessment_student_overrides.is_active', true)
+                                            ->where('assessment_student_overrides.allow_submission', true);
+                                    });
+                            });
+                    });
+            })
+            ->whereHas('course.students', fn ($courseQuery) => $courseQuery
+                ->where('students.id', $student->id)
+                ->where('course_enrollments.status', 'enrolled'));
+    }
+
     private function assignedPublishedAssignment(Assignment $assignment, Student $student): Assignment
     {
-        return Assignment::with('course')
-            ->whereKey($assignment->id)
-            ->where('status', 'published')
-            ->whereHas('course.students', fn ($query) => $query
-                ->where('students.id', $student->id)
-                ->where('course_enrollments.status', 'enrolled'))
-            ->firstOrFail();
+        return $this->scopeVisibleToStudent(
+            Assignment::with('course')->whereKey($assignment->id),
+            $student
+        )->firstOrFail();
     }
 
     private function attemptLimit(Assignment $assignment): int

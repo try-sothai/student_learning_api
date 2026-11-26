@@ -7,15 +7,20 @@
     <div class="row g-3 mb-4">
         <div class="col-sm-6 col-xl-3"><div class="student-card student-stat"><div class="stat-label">Enrolled courses</div><div class="stat-value mt-1">{{ $courses->count() }}</div></div></div>
         <div class="col-sm-6 col-xl-3"><div class="student-card student-stat"><div class="stat-label">Credits</div><div class="stat-value mt-1">{{ $courses->sum(fn ($course) => $course->credits ?? 0) }}</div></div></div>
+        @if(!empty($studentProfile))
+            <div class="col-sm-6 col-xl-3"><div class="student-card student-stat"><div class="stat-label">Student year level</div><div class="stat-value mt-1 fs-5">{{ $studentProfile->year_level_label ?? ($studentProfile->year_level ?: 'Not set') }}</div></div></div>
+            <div class="col-sm-6 col-xl-3"><div class="student-card student-stat"><div class="stat-label">Academic year</div><div class="stat-value mt-1 fs-5">{{ $studentProfile->resolveAcademicYearName() ?? 'Not set' }}</div></div></div>
+        @endif
     </div>
 
     <h2 class="h5 fw-bold mb-3">Current courses</h2>
     @if($courses->isEmpty())
         <div class="student-card p-4 text-center text-muted">You are not enrolled in any courses yet. Contact your administrator to be added to a class.</div>
     @else
-        <div class="table-responsive student-card mb-4"><table class="table student-table align-middle mb-0"><thead><tr><th class="ps-4">Course</th><th>Code</th><th>Teacher</th><th>Department</th><th>Credits</th><th>Term</th></tr></thead><tbody>
+        <div class="table-responsive student-card mb-4"><table class="table student-table align-middle mb-0"><thead><tr><th class="ps-4">Course</th><th>Code</th><th>Year level</th><th>Teacher</th><th>Faculty</th><th>Credits</th><th>Term</th></tr></thead><tbody>
             @foreach($courses as $course)
-                <tr><td class="ps-4"><strong>{{ $course->name }}</strong></td><td>{{ $course->code }}</td><td>{{ $course->teacher?->user?->name ?? 'Not assigned' }}</td><td>{{ $course->department ?? 'Not set' }}</td><td>{{ $course->credits ?? 'N/A' }}</td><td>{{ $course->pivot->academic_year ?? $course->academic_year ?? '—' }} · {{ $course->pivot->semester ?? $course->semester ?? '—' }}</td></tr>
+                @php($courseYearCode = \App\Support\YearLevel::code($course->pivot->year_level ?? $course->year_level))
+                <tr><td class="ps-4"><strong>{{ $course->name }}</strong></td><td>{{ $course->code }}</td><td><span class="badge bg-info-subtle text-info-emphasis rounded-pill">{{ $courseYearCode ?? __('Cross-year') }}</span></td><td>{{ $course->teacher?->user?->name ?? 'Not assigned' }}</td><td>{{ $course->departmentRelation?->name ?? ($course->getAttributes()['department'] ?? null) ?: 'Not set' }}</td><td>{{ $course->credits ?? 'N/A' }}</td><td>{{ $course->academic_year ?? ($studentProfile?->resolveAcademicYearName() ?? '—') }} · {{ $course->semester ?? ($studentProfile?->resolveSemesterName() ?? '—') }}</td></tr>
             @endforeach
         </tbody></table></div>
     @endif

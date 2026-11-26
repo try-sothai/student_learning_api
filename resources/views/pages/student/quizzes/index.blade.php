@@ -23,23 +23,32 @@
                 <div class="table-responsive"><table class="table student-table align-middle mb-0"><thead><tr><th class="ps-4">Quiz</th><th>Course</th><th>Questions</th><th>Due date</th><th>Status</th><th class="pe-4 text-end">Action</th></tr></thead><tbody>
                     @forelse($quizzes as $quiz)
                         @php
+                            $access = $accessMap[$quiz->id] ?? null;
                             $attempts = $quiz->attempts;
                             $latestAttempt = $attempts->first();
-                            $attemptLimit = $quiz->allow_retakes ? max(1, (int) $quiz->max_attempts) : 1;
+                            $usedAttempts = $access ? (int) ($access['used_attempts'] ?? $attempts->count()) : $attempts->count();
+                            $attemptLimit = $access ? (int) ($access['effective_attempt_limit'] ?? 1) : ($quiz->allow_retakes ? max(1, (int) $quiz->max_attempts) : 1);
                             $opensAt = $quiz->starts_at;
-                            $closesAt = $quiz->ends_at ?? $quiz->due_date?->copy()->endOfDay();
-                            $canStart = (!$opensAt || now()->gte($opensAt)) && (!$closesAt || now()->lte($closesAt)) && $attempts->count() < $attemptLimit;
-                            $quizStatus = $canStart ? ($attempts->isNotEmpty() ? 'Retake available' : 'Ready') : ($latestAttempt ? 'Completed' : (($opensAt && now()->lt($opensAt)) ? 'Opens soon' : 'Closed'));
+                            $closesAt = !empty($access['effective_deadline'])
+                                ? \Carbon\Carbon::parse($access['effective_deadline'])
+                                : ($quiz->ends_at ?? $quiz->due_date?->copy()->endOfDay());
+                            $canStart = $access
+                                ? (bool) ($access['can_submit'] ?? false)
+                                : ((!$opensAt || now()->gte($opensAt)) && (!$closesAt || now()->lte($closesAt)) && $attempts->count() < $attemptLimit);
+                            $reopenStatus = $access['reopen_status'] ?? null;
+                            $quizStatus = in_array($reopenStatus, ['Reopened', 'Extended'], true)
+                                ? $reopenStatus
+                                : ($canStart ? ($usedAttempts > 0 ? 'Retake available' : 'Ready') : ($latestAttempt ? 'Completed' : (($opensAt && now()->lt($opensAt)) ? 'Opens soon' : 'Closed')));
                         @endphp
                         <tr>
                             <td class="ps-4"><div class="d-flex align-items-center gap-3"><span class="student-icon" style="width:36px;height:36px;flex-basis:36px;border-radius:10px"><i class="bi bi-patch-question"></i></span><div><strong class="d-block">{{ $quiz->title }}</strong><small class="text-muted">{{ $quiz->description ?: 'True / false quiz' }}</small></div></div></td>
                             <td><strong class="d-block">{{ $quiz->course?->name ?? 'Course' }}</strong><small class="text-muted">{{ $quiz->course?->code }}</small></td>
                             <td>{{ $quiz->questions->count() }}</td>
-                            <td>{{ $quiz->ends_at?->format('M d, Y') ?? $quiz->due_date?->format('M d, Y') ?? 'No due date' }}</td>
+                            <td>{{ $closesAt?->format('M d, Y') ?? 'No due date' }}</td>
                             <td><span class="student-status {{ $quizStatus === 'Completed' ? 'bg-success-subtle text-success' : ($quizStatus === 'Closed' ? 'bg-secondary-subtle text-secondary' : 'portal-badge') }}">{{ $quizStatus }}</span></td>
                             <td class="pe-4 text-end">
                                 @if($canStart)
-                                    <a class="btn btn-sm btn-primary" href="{{ route('student.assignments.submit', $quiz) }}">{{ $attempts->isNotEmpty() ? 'Retake' : 'Start quiz' }}</a>
+                                    <a class="btn btn-sm btn-primary" href="{{ route('student.assignments.submit', $quiz) }}">{{ $usedAttempts > 0 ? 'Retake' : 'Start quiz' }}</a>
                                 @elseif($latestAttempt)
                                     <a class="btn btn-sm btn-outline-primary" href="{{ route('student.assignments.result', $quiz) }}">View result</a>
                                 @else

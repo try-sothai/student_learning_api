@@ -12,19 +12,29 @@ class GpaRecord extends Model
 
     protected $fillable = [
         'student_id',
+        'academic_year_id',
         'semester_id',
+        'study_year',
+        'semester_number',
         'gpa',
+        'semester_average',
         'total_credits',
         'earned_credits',
         'academic_standing',
+        'is_official',
     ];
 
     protected function casts(): array
     {
         return [
+            'academic_year_id' => 'integer',
+            'study_year' => 'integer',
+            'semester_number' => 'integer',
             'gpa' => 'float',
+            'semester_average' => 'float',
             'total_credits' => 'float',
             'earned_credits' => 'float',
+            'is_official' => 'boolean',
         ];
     }
 

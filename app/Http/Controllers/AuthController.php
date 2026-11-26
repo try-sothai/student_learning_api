@@ -260,7 +260,11 @@ class AuthController extends Controller
         $user = $request->user();
         if ($user) {
             if ($user->role === 'student') {
-                $user->load(['student.department', 'student.classRoom', 'student.program']);
+                $user->load(['student.department', 'student.classRoom.academicYear', 'student.program', 'student.courseEnrollments.semester.academicYear']);
+                if ($user->student) {
+                    $user->student->setAttribute('academic_year', $user->student->resolveAcademicYearName());
+                    $user->student->setAttribute('semester', $user->student->resolveSemesterName());
+                }
             } elseif ($user->role === 'teacher') {
                 $user->load(['teacher.department']);
             } elseif ($user->role === 'admin') {
@@ -489,7 +493,7 @@ class AuthController extends Controller
     protected function getRoleProfile(User $user)
     {
         if ($user->role === 'student') {
-            return $user->student?->load(['department', 'classRoom', 'program']);
+            return $user->student?->load(['department', 'classRoom.academicYear', 'program', 'courseEnrollments.semester.academicYear']);
         }
 
         if ($user->role === 'teacher') {
@@ -506,12 +510,17 @@ class AuthController extends Controller
     protected function getProfileData(User $user): array
     {
         $profile = $this->getRoleProfile($user);
+        $profileArray = $profile ? $profile->toArray() : null;
+        if ($profile instanceof Student && is_array($profileArray)) {
+            $profileArray['academic_year'] = $profile->resolveAcademicYearName();
+            $profileArray['semester'] = $profile->resolveSemesterName();
+        }
 
         return [
             'role' => $user->role,
             'name' => $user->name,
             'email' => $user->email,
-            'profile' => $profile ? $profile->toArray() : null,
+            'profile' => $profileArray,
         ];
     }
 }

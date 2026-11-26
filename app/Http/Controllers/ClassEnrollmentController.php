@@ -7,6 +7,7 @@ use App\Models\CourseEnrollment;
 use App\Models\CourseOffering;
 use App\Models\Semester;
 use App\Models\Student;
+use App\Support\YearLevel;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -22,11 +23,20 @@ class ClassEnrollmentController extends Controller
     public function index(Request $request): JsonResponse
     {
         $query = Student::query()
-            ->with(['department', 'program', 'classRoom.academicYear'])
+            ->with(['department', 'program', 'classRoom.academicYear', 'courseEnrollments.semester'])
             ->whereNotNull('class_id');
 
         if ($request->filled('class_id')) {
             $query->where('class_id', (int) $request->input('class_id'));
+        }
+
+        if ($request->filled('academic_year_id')) {
+            $ayId = (int) $request->input('academic_year_id');
+            $query->whereHas('classRoom', fn ($cq) => $cq->where('academic_year_id', $ayId));
+        }
+
+        if ($request->filled('year_level') && strtolower((string) $request->input('year_level')) !== 'all') {
+            $query->forYearLevel($request->input('year_level'));
         }
 
         if ($request->filled('search')) {
@@ -48,6 +58,7 @@ class ClassEnrollmentController extends Controller
 
         $data = $students->map(function (Student $s) {
             $fullName = $this->resolveStudentName($s);
+            $ylSource = $s->year_level ?? $s->classRoom?->year_level;
 
             return [
                 'id' => $s->id,
@@ -57,10 +68,15 @@ class ClassEnrollmentController extends Controller
                 'class_id' => $s->class_id,
                 'class_code' => $s->classRoom?->code ?? '',
                 'class_name' => $s->classRoom?->name ?? '',
+                'class_year_level' => $s->classRoom?->year_level,
+                'class_year_level_code' => YearLevel::code($s->classRoom?->year_level),
                 'academic_year' => $s->classRoom?->academicYear?->name ?? '',
+                'semester' => $s->resolveSemesterName() ?? '',
                 'department' => $s->department?->name ?? '',
                 'program' => $s->program?->name ?? ($s->major ?? ''),
                 'year_level' => $s->year_level,
+                'year_level_code' => YearLevel::code($ylSource),
+                'year_level_label' => YearLevel::label($ylSource),
                 'enrollment_date' => $s->enrollment_date?->toDateString() ?? $s->updated_at?->toDateString(),
                 'status' => ucfirst((string) ($s->status ?: 'enrolled')),
             ];
@@ -86,6 +102,8 @@ class ClassEnrollmentController extends Controller
                     'name' => $c->name,
                     'code' => $c->code,
                     'year_level' => $c->year_level,
+                    'year_level_code' => YearLevel::code($c->year_level),
+                    'year_level_label' => YearLevel::label($c->year_level),
                     'capacity' => $c->capacity ?? 40,
                     'status' => $c->status ?? 'active',
                     'department_id' => $c->department_id,
@@ -108,12 +126,19 @@ class ClassEnrollmentController extends Controller
             'message' => 'Enrollment lookups retrieved successfully.',
             'data' => [
                 'classes' => $classes,
-                'departments' => DB::table('departments')->orderBy('name')->get(['id', 'code', 'name']),
+                'departments' => DB::table('departments')
+                    ->where('status', 'active')
+                    ->orderBy('name')
+                    ->get(['id', 'code', 'name', 'status']),
                 'programs' => DB::table('programs')->where('status', 'active')->orderBy('name')
                     ->get(['id', 'department_id', 'code', 'name']),
+                'course_categories' => \Illuminate\Support\Facades\Schema::hasTable('course_categories')
+                    ? DB::table('course_categories')->where('status', 'active')->orderBy('name')->get(['id', 'code', 'name', 'description'])
+                    : collect(),
                 'academic_years' => DB::table('academic_years')->orderByDesc('id')->get(['id', 'name', 'status']),
                 'semesters' => DB::table('semesters')->orderBy('academic_year_id')->orderBy('semester_number')
                     ->get(['id', 'academic_year_id', 'name', 'semester_number']),
+                'year_levels' => YearLevel::options(),
             ],
         ]);
     }
@@ -121,7 +146,7 @@ class ClassEnrollmentController extends Controller
     public function studentsForClass(Request $request, ClassRoom $classRoom): JsonResponse
     {
         $query = Student::query()
-            ->with(['department', 'program', 'classRoom']);
+            ->with(['department', 'program', 'classRoom.academicYear']);
 
         if ($request->filled('search')) {
             $q = trim((string) $request->input('search'));
@@ -137,27 +162,37 @@ class ClassEnrollmentController extends Controller
             });
         }
 
-        if ($request->filled('department_id')) {
-            $query->where('department_id', (int) $request->input('department_id'));
+        if ($request->filled('department_id') || $request->filled('faculty_id')) {
+            $query->where('department_id', (int) ($request->input('department_id') ?? $request->input('faculty_id')));
         }
 
-        if ($request->filled('program_id')) {
-            $query->where('program_id', (int) $request->input('program_id'));
+        if ($request->filled('program_id') || $request->filled('major_id')) {
+            $query->where('program_id', (int) ($request->input('program_id') ?? $request->input('major_id')));
         }
 
-        if ($request->filled('year_level')) {
-            $query->where('year_level', (int) $request->input('year_level'));
+        if ($request->filled('year_level') && strtolower((string) $request->input('year_level')) !== 'all') {
+            if (strtolower((string) $request->input('year_level')) === 'missing') {
+                $query->missingYearLevel();
+            } else {
+                $query->forYearLevel($request->input('year_level'));
+            }
         }
 
         $perPage = max(1, min(100, (int) $request->input('per_page', 50)));
         $paginator = $query->orderBy('student_code')->paginate($perPage);
 
         $classActive = strtolower((string) ($classRoom->status ?? 'active')) === 'active';
+        $classYearNum = YearLevel::parse($classRoom->year_level);
 
-        $items = $paginator->getCollection()->map(function (Student $s) use ($classRoom, $classActive) {
+        $items = $paginator->getCollection()->map(function (Student $s) use ($classRoom, $classActive, $classYearNum) {
             $alreadyInSelected = (int) $s->class_id === (int) $classRoom->id;
             $statusLower = strtolower((string) ($s->status ?? 'enrolled'));
             $studentActive = ! in_array($statusLower, ['inactive', 'suspended', 'graduated', 'dropped'], true);
+            $studentYearNum = YearLevel::parse($s->year_level);
+            $yearMatches = $classYearNum === null || $studentYearNum === null || $classYearNum === $studentYearNum;
+            $yearWarning = (! $yearMatches)
+                ? ('Student is ' . (YearLevel::label($studentYearNum) ?? 'unassigned') . ' while class is ' . (YearLevel::label($classYearNum) ?? ''))
+                : null;
 
             $ineligibleReason = null;
             if (! $classActive) {
@@ -181,6 +216,11 @@ class ClassEnrollmentController extends Controller
                 'program_id' => $s->program_id,
                 'program_name' => $s->program?->name ?? ($s->major ?? ''),
                 'year_level' => $s->year_level,
+                'year_level_code' => YearLevel::code($s->year_level),
+                'year_level_label' => YearLevel::label($s->year_level),
+                'year_level_matches_class' => $yearMatches,
+                'year_level_warning' => $yearWarning,
+                'academic_year' => $s->classRoom?->academicYear?->name ?? '',
                 'status' => $s->status ?? 'enrolled',
                 'current_class_id' => $s->class_id,
                 'current_class_code' => $s->classRoom?->code ?? '',
@@ -215,14 +255,17 @@ class ClassEnrollmentController extends Controller
         $validated = $request->validate([
             'student_ids' => 'required|array|min:1',
             'student_ids.*' => 'required',
+            'strict_year_level' => 'nullable|boolean',
         ]);
 
+        $strictYearLevel = (bool) ($validated['strict_year_level'] ?? false);
+        $classYearNum = YearLevel::parse($classRoom->year_level);
         $rawIds = array_values(array_unique($validated['student_ids']));
         $enrolled = [];
         $skipped = [];
         $failed = [];
 
-        DB::transaction(function () use ($rawIds, $classRoom, &$enrolled, &$skipped, &$failed) {
+        DB::transaction(function () use ($rawIds, $classRoom, $strictYearLevel, $classYearNum, &$enrolled, &$skipped, &$failed) {
             foreach ($rawIds as $identifier) {
                 $student = is_numeric($identifier)
                     ? Student::find((int) $identifier)
@@ -257,6 +300,17 @@ class ClassEnrollmentController extends Controller
                     continue;
                 }
 
+                $studentYearNum = YearLevel::parse($student->year_level);
+                if ($strictYearLevel && $classYearNum !== null && $studentYearNum !== null && $studentYearNum !== $classYearNum) {
+                    $failed[] = [
+                        'id' => $student->id,
+                        'student_code' => $student->student_code,
+                        'full_name' => $this->resolveStudentName($student),
+                        'reason' => 'Year level mismatch: student is ' . YearLevel::code($studentYearNum) . ', class is ' . YearLevel::code($classYearNum) . '.',
+                    ];
+                    continue;
+                }
+
                 $student->class_id = $classRoom->id;
                 if (empty($student->enrollment_date)) {
                     $student->enrollment_date = now()->toDateString();
@@ -282,6 +336,7 @@ class ClassEnrollmentController extends Controller
                         [
                             'course_id' => $offering->course_id,
                             'semester_id' => $semId,
+                            'year_level' => $offering->study_year ?? $studentYearNum ?? $classYearNum,
                             'enrollment_date' => $student->enrollment_date?->toDateString() ?? now()->toDateString(),
                             'status' => 'enrolled',
                         ]
@@ -292,6 +347,8 @@ class ClassEnrollmentController extends Controller
                     'id' => $student->id,
                     'student_code' => $student->student_code,
                     'full_name' => $this->resolveStudentName($student),
+                    'year_level' => $student->year_level,
+                    'year_level_code' => YearLevel::code($student->year_level),
                     'class_code' => $classRoom->code,
                 ];
             }
@@ -303,6 +360,8 @@ class ClassEnrollmentController extends Controller
                 'class_id' => $classRoom->id,
                 'class_code' => $classRoom->code,
                 'class_name' => $classRoom->name,
+                'class_year_level' => $classRoom->year_level,
+                'class_year_level_code' => YearLevel::code($classRoom->year_level),
                 'enrolled_count' => count($enrolled),
                 'skipped_count' => count($skipped),
                 'failed_count' => count($failed),
@@ -538,6 +597,7 @@ class ClassEnrollmentController extends Controller
                         [
                             'course_id' => $offering->course_id,
                             'semester_id' => $semId,
+                            'year_level' => $offering->study_year ?? YearLevel::parse($student->year_level) ?? YearLevel::parse($classRoom->year_level),
                             'enrollment_date' => $student->enrollment_date?->toDateString() ?? now()->toDateString(),
                             'status' => 'enrolled',
                         ]

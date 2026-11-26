@@ -51,8 +51,8 @@
             <div class="card portal-card border-0">
                 <div class="card-body p-4 pb-3 d-flex flex-wrap justify-content-between align-items-center gap-3">
                     <div>
-                        <h2 class="h5 fw-bold mb-1">{{ $selectedCourse->name }}</h2>
-                        <p class="small text-muted mb-0">{{ $selectedCourse->code }} · {{ \Carbon\Carbon::parse($attendanceDate)->format('F j, Y') }}</p>
+                        <h2 class="h5 fw-bold mb-1">{{ $selectedCourse->name }} @if($selectedCourse->year_level_code)<span class="badge bg-info-subtle text-info-emphasis ms-2">{{ $selectedCourse->year_level_code }}</span>@endif</h2>
+                        <p class="small text-muted mb-0">{{ $selectedCourse->code }} · {{ \Carbon\Carbon::parse($attendanceDate)->format('F j, Y') }}{{ $selectedCourse->academic_year ? ' · ' . $selectedCourse->academic_year : '' }}</p>
                     </div>
                     <button class="btn btn-primary" type="submit" @disabled(!$canMarkAttendance || $students->isEmpty())><i class="bi bi-check2-circle me-2"></i>Save attendance</button>
                 </div>
@@ -61,13 +61,14 @@
                 @else
                     <div class="table-responsive">
                         <table class="table portal-table align-middle mb-0">
-                            <thead><tr><th class="ps-4">Student</th><th>Student ID</th><th class="pe-4" style="width: 220px">Attendance</th></tr></thead>
+                            <thead><tr><th class="ps-4">Student</th><th>Student ID</th><th>Year Level</th><th class="pe-4" style="width: 220px">Attendance</th></tr></thead>
                             <tbody>
                                 @foreach($students as $student)
                                     @php($currentStatus = $attendanceByStudent->get($student->id)?->status)
                                     <tr>
                                         <td class="ps-4 fw-semibold">{{ $student->user?->name ?? trim($student->first_name . ' ' . $student->last_name) }}</td>
                                         <td>{{ $student->student_id }}</td>
+                                        <td><span class="badge {{ $student->year_level_code ? 'bg-primary-subtle text-primary' : 'bg-warning-subtle text-warning-emphasis' }} rounded-pill">{{ $student->year_level_code ?? __('Unassigned') }}</span></td>
                                         <td class="pe-4">
                                             <select class="form-select" name="attendance[{{ $student->id }}]" aria-label="Attendance for {{ $student->user?->name ?? $student->student_id }}" required @disabled(!$canMarkAttendance)>
                                                 <option value="" @selected(!$currentStatus)>Choose status</option>

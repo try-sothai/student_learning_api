@@ -6,6 +6,8 @@ use App\Models\ClassRoom;
 use App\Models\CourseOffering;
 use App\Models\Floor;
 use App\Models\User;
+use App\Rules\ValidYearLevel;
+use App\Support\YearLevel;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -31,6 +33,26 @@ class ClassRoomController extends Controller
         }
         if ($request->filled('floor_id')) {
             $query->where('floor_id', (int) $request->floor_id);
+        }
+        if ($request->filled('department_id')) {
+            $query->where('department_id', (int) $request->department_id);
+        }
+        if ($request->filled('academic_year_id')) {
+            $query->where('academic_year_id', (int) $request->academic_year_id);
+        }
+        if ($request->filled('year_level') && strtolower((string) $request->year_level) !== 'all') {
+            $query->forYearLevel($request->year_level);
+        }
+        if ($request->filled('status') && strtolower((string) $request->status) !== 'all') {
+            $query->where('status', strtolower((string) $request->status));
+        }
+        if ($request->filled('search')) {
+            $s = trim((string) $request->search);
+            $query->where(function ($sub) use ($s) {
+                $sub->where('name', 'like', "%{$s}%")
+                    ->orWhere('code', 'like', "%{$s}%")
+                    ->orWhere('room', 'like', "%{$s}%");
+            });
         }
 
         $classes = $query
@@ -87,7 +109,7 @@ class ClassRoomController extends Controller
             'teacher_id' => 'nullable|integer|exists:teachers,id',
             'name' => 'required|string|max:100',
             'code' => 'required|string|max:50|unique:classes,code',
-            'year_level' => 'required|integer|min:1|max:10',
+            'year_level' => ['required', new ValidYearLevel()],
             'day_of_week' => 'nullable|string|max:50',
             'start_time' => 'nullable|string|max:20',
             'end_time' => 'nullable|string|max:20',
@@ -117,7 +139,7 @@ class ClassRoomController extends Controller
             'teacher_id' => $validated['teacher_id'] ?? null,
             'name' => $validated['name'],
             'code' => strtoupper($validated['code']),
-            'year_level' => $validated['year_level'],
+            'year_level' => YearLevel::parse($validated['year_level']),
             'day_of_week' => $validated['day_of_week'] ?? null,
             'start_time' => $validated['start_time'] ?? null,
             'end_time' => $validated['end_time'] ?? null,
@@ -201,6 +223,9 @@ class ClassRoomController extends Controller
                     'id' => $s->id,
                     'student_code' => $s->student_code,
                     'name' => $s->khmer_name ?: ($s->english_name ?: trim(($s->first_name ?? '').' '.($s->last_name ?? ''))),
+                    'year_level' => $s->year_level,
+                    'year_level_code' => $s->year_level_code,
+                    'year_level_label' => $s->year_level_label,
                     'status' => $s->status,
                 ])->values();
 
@@ -208,6 +233,10 @@ class ClassRoomController extends Controller
                     'id' => $c->id,
                     'code' => $c->code,
                     'name' => $c->name,
+                    'year_level' => $c->year_level,
+                    'year_level_code' => $c->year_level_code,
+                    'year_level_name' => $c->year_level_name,
+                    'year_level_label' => $c->year_level_label,
                     'department' => $c->department?->name,
                     'academic_year' => $c->academicYear?->name,
                     'building_id' => $c->building_id,
@@ -267,7 +296,7 @@ class ClassRoomController extends Controller
             'floor_id' => 'nullable|integer|exists:floors,id',
             'name' => 'required|string|max:100',
             'code' => ['required', 'string', 'max:50', Rule::unique('classes', 'code')->ignore($classRoom->id)],
-            'year_level' => 'required|integer|min:1|max:10',
+            'year_level' => ['required', new ValidYearLevel()],
             'room' => 'nullable|string|max:100',
             'capacity' => 'nullable|integer|min:1|max:500',
             'status' => 'nullable|string|in:active,inactive',
@@ -292,7 +321,7 @@ class ClassRoomController extends Controller
             'floor_id' => $floorId,
             'name' => $validated['name'],
             'code' => strtoupper($validated['code']),
-            'year_level' => $validated['year_level'],
+            'year_level' => YearLevel::parse($validated['year_level']),
             'room' => $validated['room'] ?? $validated['name'],
             'capacity' => $validated['capacity'] ?? $classRoom->capacity ?? 40,
             'status' => $validated['status'] ?? $classRoom->status,

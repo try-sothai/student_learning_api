@@ -6,7 +6,7 @@
 
 @php
     $user = Auth::user();
-    $student = $student ?? \App\Models\Student::where('user_id', $user->id)->first();
+    $student = $student ?? \App\Models\Student::with(['department', 'classRoom.academicYear', 'program', 'courseEnrollments.semester.academicYear'])->where('user_id', $user->id)->first();
     $fullName = trim(($student->first_name ?? '') . ' ' . ($student->last_name ?? ''));
     $displayName = $fullName !== '' ? $fullName : ($user->name ?? 'Student');
     $initials = strtoupper(substr(preg_replace('/[^A-Za-z]/', '', $displayName), 0, 2) ?: 'ST');
@@ -120,7 +120,7 @@
 
                         <div class="row g-4">
                             <div class="col-md-6">
-                                <label class="form-label fw-semibold">Department</label>
+                                <label class="form-label fw-semibold">Faculty</label>
                                 <div class="input-group">
                                     <span class="input-group-text bg-white"><i class="bi bi-building text-primary"></i></span>
                                     <input type="text" class="form-control" value="{{ $student->department?->name ?? '' }}" readonly>
@@ -128,10 +128,10 @@
                             </div>
 
                             <div class="col-md-6">
-                                <label class="form-label fw-semibold">Year Level</label>
+                                <label class="form-label fw-semibold">Student Year Level</label>
                                 <div class="input-group">
                                     <span class="input-group-text bg-white"><i class="bi bi-layers text-primary"></i></span>
-                                    <input type="text" class="form-control" value="{{ $student->year_level ?? '' }}" readonly>
+                                    <input type="text" class="form-control" value="{{ $student?->year_level_label ?? ($student?->year_level ?? '') }}" readonly>
                                 </div>
                             </div>
 
@@ -139,7 +139,7 @@
                                 <label class="form-label fw-semibold">Major</label>
                                 <div class="input-group">
                                     <span class="input-group-text bg-white"><i class="bi bi-code-slash text-primary"></i></span>
-                                    <input type="text" class="form-control" value="{{ $student->major ?? '' }}" readonly>
+                                    <input type="text" class="form-control" value="{{ $student->program?->name ?? ($student->major ?? '') }}" readonly>
                                 </div>
                             </div>
 
@@ -147,7 +147,7 @@
                                 <label class="form-label fw-semibold">Semester</label>
                                 <div class="input-group">
                                     <span class="input-group-text bg-white"><i class="bi bi-book text-primary"></i></span>
-                                    <input type="text" class="form-control" value="{{ $student->semester ?? '' }}" readonly>
+                                    <input type="text" class="form-control" value="{{ $student?->resolveSemesterName() ?? '' }}" readonly>
                                 </div>
                             </div>
 
@@ -155,7 +155,7 @@
                                 <label class="form-label fw-semibold">Academic Year</label>
                                 <div class="input-group">
                                     <span class="input-group-text bg-white"><i class="bi bi-calendar3 text-primary"></i></span>
-                                    <input type="text" class="form-control" value="{{ $student->academic_year ?? '' }}" readonly>
+                                    <input type="text" class="form-control" value="{{ $student?->resolveAcademicYearName() ?? '' }}" readonly>
                                 </div>
                             </div>
 

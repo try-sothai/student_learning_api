@@ -20,15 +20,21 @@
                 <tbody>
                     @foreach($assignments as $assignment)
                         @php
+                            $access = $accessMap[$assignment->id] ?? null;
                             $latestAttempt = $assignment->attempts->first();
-                            $usedAttempts = $assignment->attempts->count();
-                            $attemptLimit = $assignment->allow_retakes ? $assignment->max_attempts : 1;
+                            $usedAttempts = $access ? (int) ($access['used_attempts'] ?? $assignment->attempts->count()) : $assignment->attempts->count();
+                            $attemptLimit = $access ? (int) ($access['effective_attempt_limit'] ?? 1) : ($assignment->allow_retakes ? $assignment->max_attempts : 1);
                             $opensAt = $assignment->starts_at;
-                            $closesAt = $assignment->ends_at ?? $assignment->due_date?->endOfDay();
-                            $isOpen = (!$opensAt || now()->gte($opensAt)) && (!$closesAt || now()->lte($closesAt)) && $usedAttempts < $attemptLimit;
+                            $closesAt = !empty($access['effective_deadline'])
+                                ? \Carbon\Carbon::parse($access['effective_deadline'])
+                                : ($assignment->ends_at ?? $assignment->due_date?->endOfDay());
+                            $isOpen = $access
+                                ? (bool) ($access['can_submit'] ?? false)
+                                : ((!$opensAt || now()->gte($opensAt)) && (!$closesAt || now()->lte($closesAt)) && $usedAttempts < $attemptLimit);
+                            $reopenStatus = $access['reopen_status'] ?? null;
                         @endphp
                         <tr>
-                            <td class="ps-4"><strong>{{ $assignment->title }}</strong><small class="d-block text-muted">{{ $assignment->description }}</small></td>
+                            <td class="ps-4"><strong>{{ $assignment->title }}</strong>@if(in_array($reopenStatus, ['Reopened', 'Extended'], true)) <span class="badge text-bg-info ms-1">{{ $reopenStatus }}</span>@endif<small class="d-block text-muted">{{ $assignment->description }}</small></td>
                             <td>{{ $assignment->course?->name }}<small class="d-block text-muted">{{ $assignment->course?->code }}</small></td>
                             <td>{{ $assignment->assignment_type === 'true_false' ? 'True / False' : 'File upload' }}</td>
                             <td>

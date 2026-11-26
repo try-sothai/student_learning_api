@@ -38,6 +38,12 @@ class AcademicRecordsAuthTest extends TestCase
             'status' => 'active',
         ]);
         $this->course->update(['teacher_id' => $this->teacher->id]);
+        \App\Models\CourseEnrollment::create([
+            'student_id' => $this->student1->id,
+            'course_id' => $this->course->id,
+            'semester_id' => $this->semester->id,
+            'status' => 'enrolled',
+        ]);
         $this->adminUser = User::create(['name' => 'A1', 'email' => 'a1@test.com', 'password' => 'pwd', 'role' => 'admin']);
 
         $this->missingProfileUser = User::create(['name' => 'S3', 'email' => 's3@test.com', 'password' => 'pwd', 'role' => 'student']);
@@ -203,6 +209,10 @@ class AcademicRecordsAuthTest extends TestCase
 
         $perfData = ['student_id' => $this->student1->id, 'course_id' => $this->course->id, 'semester_id' => $this->semester->id, 'period_start' => '2026-09-01', 'period_end' => '2026-10-01'];
         $this->actingAs($this->teacherUser)->postJson('/api/performance-records', $perfData)->assertStatus(201);
+
+        // Unenrolled student remains blocked with 403
+        $otherGpa = ['student_id' => $this->student2->id, 'semester_id' => $this->semester->id, 'gpa' => 3.2, 'total_credits' => 30, 'earned_credits' => 30];
+        $this->actingAs($this->teacherUser)->postJson('/api/gpa-records', $otherGpa)->assertStatus(403);
     }
 
     public function test_admin_can_manage_records()

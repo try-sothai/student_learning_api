@@ -31,4 +31,30 @@ class Department extends Model
     {
         return $this->hasMany(Course::class);
     }
+
+    public function programs(): HasMany
+    {
+        return $this->hasMany(Program::class);
+    }
+
+    /** A Department row is a Faculty; its Majors live in the programs table. */
+    public function majors(): HasMany
+    {
+        return $this->hasMany(Program::class);
+    }
+
+    public function classSchedules(): HasMany
+    {
+        return $this->hasMany(ClassSchedule::class);
+    }
+
+    public function incidents(): HasMany
+    {
+        return $this->hasMany(Incident::class);
+    }
+
+    public function specializations(): HasMany
+    {
+        return $this->hasMany(Specialization::class);
+    }
 }

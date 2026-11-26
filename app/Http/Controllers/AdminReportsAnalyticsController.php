@@ -21,6 +21,7 @@ use App\Models\Semester;
 use App\Models\Student;
 use App\Models\Teacher;
 use App\Models\User;
+use App\Support\YearLevel;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
@@ -49,12 +50,16 @@ class AdminReportsAnalyticsController extends Controller
                 'academic_years' => AcademicYear::orderByDesc('id')->get(['id', 'name', 'status']),
                 'semesters' => Semester::orderBy('academic_year_id')->orderBy('semester_number')
                     ->get(['id', 'academic_year_id', 'name', 'semester_number']),
-                'departments' => Department::orderBy('name')->get(['id', 'code', 'name']),
+                'departments' => Department::whereRaw("LOWER(COALESCE(status, 'active')) = 'active'")->orderBy('name')->get(['id', 'code', 'name']),
                 'programs' => Program::where('status', 'active')->orderBy('name')
                     ->get(['id', 'department_id', 'code', 'name']),
+                'course_categories' => \Illuminate\Support\Facades\Schema::hasTable('course_categories')
+                    ? DB::table('course_categories')->where('status', 'active')->orderBy('name')->get(['id', 'code', 'name', 'description'])
+                    : collect(),
                 'courses' => Course::orderBy('code')->get(['id', 'department_id', 'code', 'name', 'credits', 'status']),
                 'classes' => ClassRoom::orderBy('code')->get(['id', 'department_id', 'academic_year_id', 'code', 'name', 'status']),
                 'teachers' => Teacher::orderBy('first_name')->get(['id', 'teacher_code', 'first_name', 'last_name', 'department_id']),
+                'year_levels' => YearLevel::options(),
                 'workload_thresholds' => [
                     'underloaded_max' => (float) config('slas.workload_underloaded_max', self::DEFAULT_UNDERLOADED_MAX),
                     'overloaded_min' => (float) config('slas.workload_overloaded_min', self::DEFAULT_OVERLOADED_MIN),
@@ -65,14 +70,30 @@ class AdminReportsAnalyticsController extends Controller
 
     public function overview(Request $request): JsonResponse
     {
-        $deptId = $request->filled('department_id') ? (int) $request->input('department_id') : null;
+        $deptId = ($request->filled('department_id') || $request->filled('faculty_id'))
+            ? (int) ($request->input('department_id') ?? $request->input('faculty_id'))
+            : null;
         $ayId = $request->filled('academic_year_id') ? (int) $request->input('academic_year_id') : null;
         $semId = $request->filled('semester_id') ? (int) $request->input('semester_id') : null;
+        $yearLevel = $request->filled('year_level') && strtolower((string) $request->input('year_level')) !== 'all'
+            ? trim((string) $request->input('year_level'))
+            : null;
+        $applyYearLevelToStudents = function ($q) use ($yearLevel) {
+            if ($yearLevel === null) {
+                return;
+            }
+            if (strtolower($yearLevel) === 'missing') {
+                $q->missingYearLevel();
+            } else {
+                $q->forYearLevel($yearLevel);
+            }
+        };
 
         $studentQuery = Student::query();
         if ($deptId) {
             $studentQuery->where('department_id', $deptId);
         }
+        $applyYearLevelToStudents($studentQuery);
         $totalStudents = (clone $studentQuery)->count();
         $activeStudents = (clone $studentQuery)->whereIn('status', ['enrolled', 'active'])->count();
 
@@ -86,6 +107,9 @@ class AdminReportsAnalyticsController extends Controller
         if ($deptId) {
             $courseQuery->where('department_id', $deptId);
         }
+        if ($yearLevel !== null && strtolower($yearLevel) !== 'missing') {
+            $courseQuery->forYearLevel($yearLevel);
+        }
         $totalCourses = (clone $courseQuery)->count();
         $activeCourses = (clone $courseQuery)->where('status', 'active')->count();
 
@@ -95,6 +119,9 @@ class AdminReportsAnalyticsController extends Controller
         }
         if ($ayId) {
             $classQuery->where('academic_year_id', $ayId);
+        }
+        if ($yearLevel !== null && strtolower($yearLevel) !== 'missing') {
+            $classQuery->forYearLevel($yearLevel);
         }
         $totalClasses = $classQuery->count();
 
@@ -115,8 +142,13 @@ class AdminReportsAnalyticsController extends Controller
         } elseif ($ayId) {
             $gpaQuery->whereHas('semester', fn ($q) => $q->where('academic_year_id', $ayId));
         }
-        if ($deptId) {
-            $gpaQuery->whereHas('student', fn ($q) => $q->where('department_id', $deptId));
+        if ($deptId || $yearLevel !== null) {
+            $gpaQuery->whereHas('student', function ($q) use ($deptId, $applyYearLevelToStudents) {
+                if ($deptId) {
+                    $q->where('department_id', $deptId);
+                }
+                $applyYearLevelToStudents($q);
+            });
         }
         $avgGpa = $gpaQuery->avg('gpa');
 
@@ -127,17 +159,25 @@ class AdminReportsAnalyticsController extends Controller
         } elseif ($ayId) {
             $attQuery->whereHas('attendance.semester', fn ($q) => $q->where('academic_year_id', $ayId));
         }
-        if ($deptId) {
-            $attQuery->whereHas('student', fn ($q) => $q->where('department_id', $deptId));
+        if ($deptId || $yearLevel !== null) {
+            $attQuery->whereHas('student', function ($q) use ($deptId, $applyYearLevelToStudents) {
+                if ($deptId) {
+                    $q->where('department_id', $deptId);
+                }
+                $applyYearLevelToStudents($q);
+            });
         }
         $attTotal = (clone $attQuery)->count();
         $attPresent = (clone $attQuery)->whereIn('status', ['present', 'late'])->count();
         $attendanceRate = $attTotal > 0 ? round(($attPresent / $attTotal) * 100, 1) : null;
 
         // Assignment & Quiz averages
-        $assignQuery = AssignmentSubmission::whereNotNull('score');
+        $assignQuery = AssignmentSubmission::where('is_latest', true)->whereNotNull('score');
         if ($semId) {
             $assignQuery->whereHas('assignment', fn ($q) => $q->where('semester_id', $semId));
+        }
+        if ($yearLevel !== null) {
+            $assignQuery->whereHas('student', fn ($q) => $applyYearLevelToStudents($q));
         }
         $avgAssignment = $assignQuery->avg('score');
 
@@ -145,13 +185,21 @@ class AdminReportsAnalyticsController extends Controller
         if ($semId) {
             $quizQuery->whereHas('quiz', fn ($q) => $q->where('semester_id', $semId));
         }
+        if ($yearLevel !== null) {
+            $quizQuery->whereHas('student', fn ($q) => $applyYearLevelToStudents($q));
+        }
         $avgQuiz = $quizQuery->avg('score');
 
         // Enrollment Trend by Academic Year
-        $enrollmentTrend = AcademicYear::orderBy('start_date')->get()->map(function (AcademicYear $ay) use ($deptId) {
+        $enrollmentTrend = AcademicYear::orderBy('start_date')->get()->map(function (AcademicYear $ay) use ($deptId, $yearLevel, $applyYearLevelToStudents) {
             $q = CourseEnrollment::whereHas('semester', fn ($sq) => $sq->where('academic_year_id', $ay->id));
-            if ($deptId) {
-                $q->whereHas('student', fn ($stq) => $stq->where('department_id', $deptId));
+            if ($deptId || $yearLevel !== null) {
+                $q->whereHas('student', function ($stq) use ($deptId, $applyYearLevelToStudents) {
+                    if ($deptId) {
+                        $stq->where('department_id', $deptId);
+                    }
+                    $applyYearLevelToStudents($stq);
+                });
             }
             return [
                 'label' => $ay->name,
@@ -186,15 +234,19 @@ class AdminReportsAnalyticsController extends Controller
                     'student_name' => $this->studentName($s),
                     'department' => $s?->department?->name ?? '',
                     'class_code' => $s?->classRoom?->code ?? '',
+                    'year_level' => $s?->year_level,
+                    'year_level_code' => $s?->year_level_code ?? '',
+                    'year_level_label' => $s?->year_level_label ?? '',
                     'gpa' => round((float) $g->gpa, 2),
                 ];
             })->values();
 
-        // Real student enrollment roster (filtered by department / semester / academic year)
-        $rosterQuery = Student::with(['department', 'classRoom']);
+        // Real student enrollment roster (filtered by department / semester / academic year / year level)
+        $rosterQuery = Student::with(['department', 'classRoom.academicYear']);
         if ($deptId) {
             $rosterQuery->where('department_id', $deptId);
         }
+        $applyYearLevelToStudents($rosterQuery);
         $rosterStudents = $rosterQuery->orderBy('student_code')->limit(50)->get();
         $rosterIds = $rosterStudents->pluck('id')->all();
         $enrollCountsQuery = CourseEnrollment::whereIn('student_id', $rosterIds);
@@ -214,10 +266,30 @@ class AdminReportsAnalyticsController extends Controller
                 'student_name' => $this->studentName($s),
                 'department' => $s->department?->name ?? '',
                 'class_code' => $s->classRoom?->code ?? '',
+                'year_level' => $s->year_level,
+                'year_level_code' => $s->year_level_code ?? '',
+                'year_level_label' => $s->year_level_label ?? '',
+                'academic_year' => $s->resolveAcademicYearName() ?? '',
                 'status' => ucfirst((string) ($s->status ?? 'active')),
                 'enrollment_count' => (int) ($enrollCountsByStudent->get($s->id) ?? 0),
             ];
         })->values();
+
+        $allScopedStudents = (clone $studentQuery)->get(['id', 'year_level']);
+        $ylCounts = array_fill(1, YearLevel::maxLevel(), 0);
+        foreach ($allScopedStudents as $st) {
+            $lvl = YearLevel::parse($st->year_level);
+            if ($lvl !== null && isset($ylCounts[$lvl])) {
+                $ylCounts[$lvl]++;
+            }
+        }
+        $yearLevelBreakdown = array_map(fn (array $opt) => [
+            'year_level' => $opt['number'],
+            'code' => $opt['code'],
+            'name' => $opt['name'],
+            'label' => $opt['label'],
+            'count' => $ylCounts[$opt['number']] ?? 0,
+        ], YearLevel::options());
 
         return response()->json([
             'message' => 'Overview analytics retrieved successfully.',
@@ -239,6 +311,7 @@ class AdminReportsAnalyticsController extends Controller
                     'assignment_performance' => $avgAssignment !== null ? round((float) $avgAssignment, 1) : null,
                     'quiz_performance' => $avgQuiz !== null ? round((float) $avgQuiz, 1) : null,
                 ],
+                'year_level_breakdown' => $yearLevelBreakdown,
                 'enrollment_trend' => $enrollmentTrend,
                 'department_distribution' => $deptDistribution,
                 'gpa_distribution' => $gpaBuckets,
@@ -250,7 +323,9 @@ class AdminReportsAnalyticsController extends Controller
 
     public function attendance(Request $request): JsonResponse
     {
-        $deptId = $request->filled('department_id') ? (int) $request->input('department_id') : null;
+        $deptId = ($request->filled('department_id') || $request->filled('faculty_id'))
+            ? (int) ($request->input('department_id') ?? $request->input('faculty_id'))
+            : null;
         $ayId = $request->filled('academic_year_id') ? (int) $request->input('academic_year_id') : null;
         $semId = $request->filled('semester_id') ? (int) $request->input('semester_id') : null;
         $courseId = $request->filled('course_id') ? (int) $request->input('course_id') : null;
@@ -270,6 +345,10 @@ class AdminReportsAnalyticsController extends Controller
         }
         if ($classId) {
             $baseQuery->whereHas('student', fn ($q) => $q->where('class_id', $classId));
+        }
+        if ($request->filled('year_level') && strtolower((string) $request->input('year_level')) !== 'all') {
+            $ylInput = $request->input('year_level');
+            $baseQuery->whereHas('student', fn ($q) => strtolower((string) $ylInput) === 'missing' ? $q->missingYearLevel() : $q->forYearLevel($ylInput));
         }
 
         $counts = (clone $baseQuery)->selectRaw(
@@ -379,8 +458,8 @@ class AdminReportsAnalyticsController extends Controller
         $overloadedMin = (float) ($request->input('overloaded_min') ?: config('slas.workload_overloaded_min', self::DEFAULT_OVERLOADED_MIN));
 
         $query = Teacher::with(['department', 'courses', 'classes']);
-        if ($request->filled('department_id')) {
-            $query->where('department_id', (int) $request->input('department_id'));
+        if ($request->filled('department_id') || $request->filled('faculty_id')) {
+            $query->where('department_id', (int) ($request->input('department_id') ?? $request->input('faculty_id')));
         }
         if ($request->filled('search')) {
             $q = trim((string) $request->input('search'));
@@ -490,13 +569,18 @@ class AdminReportsAnalyticsController extends Controller
 
     public function courses(Request $request): JsonResponse
     {
-        $deptId = $request->filled('department_id') ? (int) $request->input('department_id') : null;
+        $deptId = ($request->filled('department_id') || $request->filled('faculty_id'))
+            ? (int) ($request->input('department_id') ?? $request->input('faculty_id'))
+            : null;
         $semId = $request->filled('semester_id') ? (int) $request->input('semester_id') : null;
         $ayId = $request->filled('academic_year_id') ? (int) $request->input('academic_year_id') : null;
 
         $courseQuery = Course::with(['department']);
         if ($deptId) {
             $courseQuery->where('department_id', $deptId);
+        }
+        if ($request->filled('year_level') && strtolower((string) $request->input('year_level')) !== 'all') {
+            $courseQuery->forYearLevel($request->input('year_level'));
         }
         if ($request->filled('course_id')) {
             $courseQuery->where('id', (int) $request->input('course_id'));
@@ -544,6 +628,9 @@ class AdminReportsAnalyticsController extends Controller
                 'code' => $c->code,
                 'name' => $c->name,
                 'department' => $c->department?->name ?? '',
+                'year_level' => $c->year_level,
+                'year_level_code' => $c->year_level_code ?? 'Cross-year',
+                'year_level_label' => $c->year_level_label ?? 'Cross-year / All levels',
                 'status' => ucfirst((string) ($c->status ?? 'active')),
                 'enrollment_count' => $enrolled,
                 'completed_count' => $completed,
@@ -648,12 +735,19 @@ class AdminReportsAnalyticsController extends Controller
     {
         $category = strtolower((string) $request->input('category', 'student'));
         $reportKey = strtolower((string) $request->input('report_key', 'information'));
-        $deptId = $request->filled('department_id') ? (int) $request->input('department_id') : null;
-        $programId = $request->filled('program_id') ? (int) $request->input('program_id') : null;
+        $deptId = ($request->filled('department_id') || $request->filled('faculty_id'))
+            ? (int) ($request->input('department_id') ?? $request->input('faculty_id'))
+            : null;
+        $programId = ($request->filled('program_id') || $request->filled('major_id'))
+            ? (int) ($request->input('program_id') ?? $request->input('major_id'))
+            : null;
         $courseId = $request->filled('course_id') ? (int) $request->input('course_id') : null;
         $classId = $request->filled('class_id') ? (int) $request->input('class_id') : null;
         $ayId = $request->filled('academic_year_id') ? (int) $request->input('academic_year_id') : null;
         $semId = $request->filled('semester_id') ? (int) $request->input('semester_id') : null;
+        $yearLevel = $request->filled('year_level') && strtolower((string) $request->input('year_level')) !== 'all'
+            ? trim((string) $request->input('year_level'))
+            : null;
         $status = $request->filled('status') ? trim((string) $request->input('status')) : null;
         $search = $request->filled('search') ? trim((string) $request->input('search')) : null;
 
@@ -663,7 +757,7 @@ class AdminReportsAnalyticsController extends Controller
         $title = ucfirst($category) . ' - ' . ucwords(str_replace('_', ' ', $reportKey)) . ' Report';
 
         if ($category === 'teacher') {
-            $columns = ['Teacher ID', 'Name', 'Department', 'Position', 'Courses', 'Classes', 'Status'];
+            $columns = ['Teacher ID', 'Name', 'Faculty', 'Position', 'Courses', 'Classes', 'Status'];
             $q = Teacher::with(['department', 'courses', 'classes']);
             if ($deptId) $q->where('department_id', $deptId);
             if ($search) {
@@ -683,15 +777,18 @@ class AdminReportsAnalyticsController extends Controller
             }
             $summary = ['Total Teachers' => count($rows)];
         } elseif ($category === 'course' || $category === 'academic') {
-            $columns = ['Course Code', 'Course Name', 'Department', 'Credits', 'Enrollments', 'Status'];
-            $q = Course::with(['department'])->withCount('enrollments');
+            $columns = ['Course Code', 'Course Name', 'Year Level', 'Academic Year', 'Faculty', 'Credits', 'Enrollments', 'Status'];
+            $q = Course::with(['department', 'offerings.academicYear'])->withCount('enrollments');
             if ($deptId) $q->where('department_id', $deptId);
             if ($courseId) $q->where('id', $courseId);
+            if ($yearLevel !== null && strtolower($yearLevel) !== 'missing') $q->forYearLevel($yearLevel);
             if ($status && strtolower($status) !== 'all') $q->where('status', strtolower($status));
             foreach ($q->orderBy('code')->get() as $c) {
                 $rows[] = [
                     $c->code,
                     $c->name,
+                    $c->year_level_code ?? 'Cross-year',
+                    $c->academic_year ?: ($c->offerings->first()?->academicYear?->name ?? 'Not set'),
                     $c->department?->name ?? 'N/A',
                     (string) ($c->credits ?? 3),
                     (string) $c->enrollments_count,
@@ -700,16 +797,18 @@ class AdminReportsAnalyticsController extends Controller
             }
             $summary = ['Total Courses' => count($rows)];
         } elseif ($category === 'attendance') {
-            $columns = ['Student ID', 'Student Name', 'Course', 'Date', 'Status'];
+            $columns = ['Student ID', 'Student Name', 'Year Level', 'Course', 'Date', 'Status'];
             $q = AttendanceDetail::with(['student', 'attendance.course']);
             if ($semId) $q->whereHas('attendance', fn ($aq) => $aq->where('semester_id', $semId));
             if ($courseId) $q->whereHas('attendance', fn ($aq) => $aq->where('course_id', $courseId));
             if ($deptId) $q->whereHas('student', fn ($sq) => $sq->where('department_id', $deptId));
+            if ($yearLevel !== null) $q->whereHas('student', fn ($sq) => strtolower($yearLevel) === 'missing' ? $sq->missingYearLevel() : $sq->forYearLevel($yearLevel));
             $details = $q->latest()->limit(500)->get();
             foreach ($details as $d) {
                 $rows[] = [
                     $d->student?->student_code ?? '',
                     $this->studentName($d->student),
+                    $d->student?->year_level_code ?? 'Unassigned',
                     $d->attendance?->course?->code ?? '',
                     (string) ($d->attendance?->attendance_date ?? ''),
                     ucfirst((string) ($d->status ?? '')),
@@ -721,16 +820,18 @@ class AdminReportsAnalyticsController extends Controller
                 'Attendance Rate' => count($rows) > 0 ? round(($present / count($rows)) * 100, 1) . '%' : '0%',
             ];
         } elseif ($category === 'assessment') {
-            $columns = ['Student ID', 'Student Name', 'Course', 'Score', 'Grade'];
+            $columns = ['Student ID', 'Student Name', 'Year Level', 'Course', 'Score', 'Grade'];
             $q = Grade::with(['student', 'course']);
             if ($semId) $q->where('semester_id', $semId);
             if ($courseId) $q->where('course_id', $courseId);
             if ($deptId) $q->whereHas('student', fn ($sq) => $sq->where('department_id', $deptId));
+            if ($yearLevel !== null) $q->whereHas('student', fn ($sq) => strtolower($yearLevel) === 'missing' ? $sq->missingYearLevel() : $sq->forYearLevel($yearLevel));
             $grades = $q->latest()->limit(500)->get();
             foreach ($grades as $g) {
                 $rows[] = [
                     $g->student?->student_code ?? '',
                     $this->studentName($g->student),
+                    $g->student?->year_level_code ?? 'Unassigned',
                     $g->course?->code ?? '',
                     $g->total_score !== null ? number_format((float) $g->total_score, 1) : 'N/A',
                     $g->grade ?? 'N/A',
@@ -739,11 +840,24 @@ class AdminReportsAnalyticsController extends Controller
             $summary = ['Total Graded Records' => count($rows)];
         } else {
             // student or analytics
-            $columns = ['Student ID', 'Full Name', 'Department', 'Program', 'Class', 'Status'];
-            $q = Student::with(['department', 'program', 'classRoom']);
+            $columns = ['Student ID', 'Full Name', 'Faculty', 'Major', 'Class', 'Year Level', 'Academic Year', 'Status'];
+            $q = Student::with(['department', 'program', 'classRoom.academicYear', 'courseEnrollments.semester.academicYear']);
             if ($deptId) $q->where('department_id', $deptId);
             if ($programId) $q->where('program_id', $programId);
             if ($classId) $q->where('class_id', $classId);
+            if ($ayId) {
+                $q->where(function ($sub) use ($ayId) {
+                    $sub->whereHas('classRoom', fn ($cq) => $cq->where('academic_year_id', $ayId))
+                        ->orWhereHas('courseEnrollments.courseOffering', fn ($oq) => $oq->where('academic_year_id', $ayId));
+                });
+            }
+            if ($yearLevel !== null) {
+                if (strtolower($yearLevel) === 'missing') {
+                    $q->missingYearLevel();
+                } else {
+                    $q->forYearLevel($yearLevel);
+                }
+            }
             if ($status && strtolower($status) !== 'all') $q->where('status', strtolower($status));
             if ($search) {
                 $q->where(fn ($s) => $s->where('student_code', 'like', "%{$search}%")->orWhere('english_name', 'like', "%{$search}%")->orWhere('khmer_name', 'like', "%{$search}%"));
@@ -752,13 +866,16 @@ class AdminReportsAnalyticsController extends Controller
                 $atRiskIds = RiskAssessment::whereIn('risk_level', ['high', 'medium'])->pluck('student_id')->all();
                 $q->whereIn('id', $atRiskIds);
             }
-            foreach ($q->orderBy('student_code')->limit(500)->get() as $st) {
+            $students = $q->orderBy('student_code')->limit(500)->get();
+            foreach ($students as $st) {
                 $rows[] = [
                     $st->student_code,
                     $this->studentName($st),
                     $st->department?->name ?? 'N/A',
                     $st->program?->name ?? ($st->major ?? 'N/A'),
                     $st->classRoom?->code ?? 'Unassigned',
+                    $st->year_level_label ?? 'Unassigned',
+                    $st->resolveAcademicYearName() ?? 'Not set',
                     ucfirst((string) ($st->status ?? 'enrolled')),
                 ];
             }
