@@ -351,6 +351,24 @@
             box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
         }
 
+
+        /* Premium motion and depth refinements */
+        .portal-sidebar {
+            background: linear-gradient(180deg, #fbfaff 0%, #f0edff 100%);
+            border-right-color: #e8e3fb;
+            box-shadow: 8px 0 30px rgba(47, 34, 109, .035);
+        }
+        .portal-brand-logo { border-radius: 15px; box-shadow: 0 5px 16px rgba(91, 63, 194, .12); }
+        .portal-header { background: linear-gradient(115deg, #4936b8 0%, #6746e8 55%, #8164ef 100%) !important; }
+        .portal-nav a { border-radius: 12px; transition: background .2s ease, color .2s ease, transform .2s ease; }
+        .portal-nav a:hover { transform: translateX(3px); }
+        .portal-nav a.active { box-shadow: 0 7px 18px rgba(91, 63, 194, .22); }
+        .portal-content { animation: slas-shell-enter .42s ease both; }
+        @keyframes slas-shell-enter { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+        }
+
     </style>
     @stack('styles')
 </head>
