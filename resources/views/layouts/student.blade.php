@@ -579,6 +579,23 @@
             font-weight: 700;
         }
 
+
+        /* Premium motion and depth refinements */
+        .student-sidebar {
+            background: linear-gradient(180deg, #fbfaff 0%, #f0edff 100%);
+            border-right-color: #e8e3fb;
+            box-shadow: 8px 0 30px rgba(47, 34, 109, .035);
+        }
+        .student-logo { border-bottom-color: #e8e3fb; }
+        .student-logo-icon { border-radius: 15px; box-shadow: 0 5px 16px rgba(91, 63, 194, .12); }
+        .student-user-card { border: 1px solid #eeebf7; background: #fbfaff; }
+        .student-global-header { background: linear-gradient(115deg, #4936b8 0%, #6746e8 55%, #8164ef 100%) !important; }
+        .student-nav-link.active { box-shadow: 0 7px 18px rgba(91, 63, 194, .22); }
+        .student-content { background: #f6f7fc; }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+        }
+
     </style>
 
     @stack('styles')
